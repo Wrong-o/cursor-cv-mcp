@@ -392,49 +392,63 @@ def find_element(
         # Convert to RGB for better processing
         image_rgb = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
         
+        # Print image dimensions for debugging
+        print(f"Image dimensions: {image_rgb.shape}")
+        
         # Apply search area if provided
         if search_area and len(search_area) == 4:
             x, y, w, h = search_area
             image_rgb = image_rgb[y:y+h, x:x+w]
             offset_x, offset_y = x, y
+            print(f"Using search area: ({x}, {y}, {w}, {h})")
         else:
             offset_x, offset_y = 0, 0
         
         # Create a copy for visualization if debug is enabled
         if debug:
             debug_image = image_rgb.copy()
+            print("Debug mode enabled, created debug image copy")
         
         # Initialize result
         result = None
         
         # Method 1: Find by reference image (template matching)
         if reference_image:
+            print(f"Attempting to find element by template matching with reference image: {reference_image}")
             result = find_by_template(image_rgb, reference_image, confidence, debug)
             if result:
                 result['x'] += offset_x
                 result['y'] += offset_y
-                print(f"Found element by template matching at ({result['x']}, {result['y']})")
+                print(f"Found element by template matching at ({result['x']}, {result['y']}) with confidence {result['confidence']}")
                 return result
+            else:
+                print("Template matching failed to find element")
         
         # Method 2: Find by text using OCR
         if text:
+            print(f"Attempting to find element by text content: '{text}'")
             result = find_by_text(image_rgb, text, confidence, debug)
             if result:
                 result['x'] += offset_x
                 result['y'] += offset_y
-                print(f"Found element by text '{text}' at ({result['x']}, {result['y']})")
+                print(f"Found element by text '{text}' at ({result['x']}, {result['y']}) with confidence {result['confidence']}")
                 return result
+            else:
+                print(f"OCR failed to find text '{text}'")
         
         # Method 3: Find by element type (heuristics and feature detection)
         if element_type:
+            print(f"Attempting to find element by type: '{element_type}'")
             result = find_by_element_type(image_rgb, element_type, confidence, debug)
             if result:
                 result['x'] += offset_x
                 result['y'] += offset_y
-                print(f"Found element of type '{element_type}' at ({result['x']}, {result['y']})")
+                print(f"Found element of type '{element_type}' at ({result['x']}, {result['y']}) with confidence {result['confidence']}")
                 return result
+            else:
+                print(f"Failed to find element of type '{element_type}'")
         
-        print("Element not found")
+        print("Element not found using any method")
         return None
     
     except Exception as e:

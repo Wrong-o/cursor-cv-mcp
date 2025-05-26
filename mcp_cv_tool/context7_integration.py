@@ -362,16 +362,36 @@ def mcp_find_element(params: Dict[str, Any]) -> Dict[str, Any]:
                 "error": "Element not found"
             }
         
-        # Return element information
+        # Make sure element is properly serialized
+        print(f"Found element details: {element}")
+        
+        # Create a serializable copy of the element dictionary
+        element_data = {
+            "x": int(element.get("x", 0)),
+            "y": int(element.get("y", 0)),
+            "width": int(element.get("width", 0)),
+            "height": int(element.get("height", 0)),
+            "confidence": float(element.get("confidence", 0.0)),
+            "method": str(element.get("method", "unknown")),
+            "center_x": int(element.get("center_x", 0)),
+            "center_y": int(element.get("center_y", 0))
+        }
+        
+        # Add text if it's available (for OCR results)
+        if "text" in element:
+            element_data["text"] = str(element.get("text", ""))
+        
         return {
             "success": True,
-            "element": element,
+            "element": element_data,
             "message": f"Found element using method '{element.get('method')}' with confidence {element.get('confidence'):.2f}"
         }
     except Exception as e:
+        import traceback
+        traceback.print_exc()
         return {
             "success": False,
-            "error": str(e)
+            "error": f"Error finding element: {str(e)}"
         }
 
 # Function registry mapping function names to their implementations

@@ -220,20 +220,22 @@ class MCPCallRequest(BaseModel):
     params: Dict[str, Any] = {}
 
 class MCPCallResponse(BaseModel):
+    """Response model for MCP function calls."""
     success: bool
-    message: Optional[str] = None
     error: Optional[str] = None
+    message: Optional[str] = None
     screenshot_path: Optional[str] = None
-    resolution: Optional[List[int]] = None
+    resolution: Optional[str] = None
     analysis: Optional[Dict[str, Any]] = None
     monitors: Optional[List[Dict[str, Any]]] = None
     primary: Optional[int] = None
     position: Optional[List[int]] = None
+    text: Optional[str] = None
     button: Optional[str] = None
     clicks: Optional[int] = None
-    text: Optional[str] = None
     key: Optional[str] = None
     area: Optional[Dict[str, Any]] = None
+    element: Optional[Dict[str, Any]] = None  # Added for element detection
 
 @app.get(
     "/mcp/list_functions", 
@@ -251,17 +253,38 @@ async def mcp_list_functions() -> dict:
         ]
     }
 
-@app.post(
-    "/mcp/call_function", 
-    response_model=MCPCallResponse,
-    tags=["MCP Standard"],
-    summary="Call an MCP function",
-    description="Calls an MCP function by name with the provided parameters"
-)
-async def mcp_call_function(request_data: MCPCallRequest) -> dict:
-    """Call an MCP function by name with parameters."""
-    logger.info("mcp_call_function", function=request_data.function_name)
-    return call_function(request_data.function_name, request_data.params)
+@app.post("/mcp/call_function", response_model=MCPCallResponse)
+async def mcp_call_function(request: MCPCallRequest):
+    """Call an MCP function."""
+    logger.info("mcp_call_function", function=request.function_name)
+    
+    if request.function_name not in FUNCTION_REGISTRY:
+        return {
+            "success": False,
+            "error": f"Unknown function: {request.function_name}",
+            "available_functions": list(FUNCTION_REGISTRY.keys()),
+        }
+    
+    try:
+        result = FUNCTION_REGISTRY[request.function_name](request.params)
+        # Ensure result is a valid response model
+        for key in result:
+            if key not in MCPCallResponse.__annotations__:
+                logger.warning(f"Unexpected key in response: {key}")
+                
+        return result
+    except Exception as e:
+        import traceback
+        error_trace = traceback.format_exc()
+        logger.error("Error calling function", 
+                    function=request.function_name,
+                    error=str(e),
+                    traceback=error_trace)
+        
+        return {
+            "success": False,
+            "error": f"Error calling function {request.function_name}: {str(e)}",
+        }
 
 @app.exception_handler(Exception)
 async def global_exception_handler(request: Request, exc: Exception) -> JSONResponse:
