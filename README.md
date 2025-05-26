@@ -10,6 +10,7 @@ This project provides a FastAPI server with capabilities for:
 - Keyboard automation (typing, key presses)
 - Multi-monitor support
 - MCP standard API endpoints
+- **NEW: UI Element Detection** using computer vision
 
 The server runs locally and provides a standardized REST API following the MCP standard, making it easy to integrate with other tools and AI agents.
 
@@ -27,6 +28,15 @@ The server runs locally and provides a standardized REST API following the MCP s
 - Visual area highlighting
 - Both PyAutoGUI and xdotool support (fallback mechanism)
 
+### Element Detection (New!)
+- Detect UI elements like buttons, input fields, and checkboxes
+- Find elements by:
+  - Element type (button, input, checkbox)
+  - Text content (using OCR)
+  - Reference image (template matching)
+- Get precise element coordinates and dimensions
+- Interact with detected elements (click, type)
+
 ### MCP Standard Integration
 - Standardized `/mcp/list_functions` endpoint to discover available functions
 - Standardized `/mcp/call_function` endpoint to invoke any function with parameters
@@ -39,6 +49,8 @@ The server runs locally and provides a standardized REST API following the MCP s
 - Python 3.8+
 - X11 display server (for Linux)
 - Web browser
+- Tesseract OCR (for text recognition)
+- OpenCV (for computer vision)
 
 ### Setup
 
@@ -101,21 +113,43 @@ screenshot = requests.post(
 ).json()
 print(f"Screenshot saved to: {screenshot['screenshot_path']}")
 
-# Move mouse and click
-click_result = requests.post(
+# Find a button on the screen
+element = requests.post(
     "http://localhost:8001/mcp/call_function",
     json={
-        "function_name": "mcp_mouse_click",
-        "params": {"x": 500, "y": 500}
+        "function_name": "mcp_find_element",
+        "params": {
+            "screenshot_path": screenshot['screenshot_path'],
+            "element_type": "button"
+        }
     }
 ).json()
 
-# Type text
-type_result = requests.post(
+if element['success']:
+    # Click on the found button
+    requests.post(
+        "http://localhost:8001/mcp/call_function",
+        json={
+            "function_name": "mcp_mouse_click",
+            "params": {
+                "x": element['element']['center_x'],
+                "y": element['element']['center_y']
+            }
+        }
+    )
+```
+
+#### Finding Elements by Text
+
+```python
+# Find an element containing specific text
+element = requests.post(
     "http://localhost:8001/mcp/call_function",
     json={
-        "function_name": "mcp_type_text",
-        "params": {"text": "Hello world!"}
+        "function_name": "mcp_find_element",
+        "params": {
+            "text": "Login"  # Will find buttons, links or text containing "Login"
+        }
     }
 ).json()
 ```
@@ -131,15 +165,10 @@ curl -X POST http://localhost:8001/mcp/call_function \
   -H "Content-Type: application/json" \
   -d '{"function_name": "mcp_screenshot_capture", "params": {"monitor": 1}}'
 
-# Click at a position
+# Find a button element
 curl -X POST http://localhost:8001/mcp/call_function \
   -H "Content-Type: application/json" \
-  -d '{"function_name": "mcp_mouse_click", "params": {"x": 500, "y": 500}}'
-
-# Type text
-curl -X POST http://localhost:8001/mcp/call_function \
-  -H "Content-Type: application/json" \
-  -d '{"function_name": "mcp_type_text", "params": {"text": "Hello world!"}}'
+  -d '{"function_name": "mcp_find_element", "params": {"element_type": "button"}}'
 ```
 
 ## Available MCP Functions
@@ -154,6 +183,15 @@ curl -X POST http://localhost:8001/mcp/call_function \
 | `mcp_press_key` | Presses a specific key | `key` |
 | `mcp_get_mouse_position` | Gets current mouse position | - |
 | `mcp_highlight_area` | Highlights an area | `x`, `y`, `width`, `height`, `duration` |
+| `mcp_find_element` | Finds UI elements | `screenshot_path`, `element_type`, `text`, `reference_image`, `search_area`, `confidence` |
+
+## Example Scripts
+
+The project includes several example scripts to demonstrate functionality:
+
+- `examples/test_element_detection.py`: Shows how to find and interact with UI elements
+- `mcp_test_click.py`: Demonstrates basic mouse clicking functionality
+- `test_pyautogui.py`: Tests PyAutoGUI functionality
 
 ## Troubleshooting
 
@@ -174,6 +212,13 @@ If the mouse isn't moving:
 1. Verify the server has X11 display access
 2. Check that PyAutoGUI is installed correctly
 3. The fallback xdotool method should automatically activate
+
+### Element Detection Issues
+
+If element detection isn't working properly:
+1. Try lowering the confidence threshold (default is 0.7)
+2. For text-based detection, ensure Tesseract OCR is properly installed
+3. Use the debug flag to get more information about the detection process
 
 ## License
 

@@ -16,6 +16,16 @@ try:
 except ImportError:
     HAS_PYAUTOGUI = False
 
+# Computer vision and image processing
+try:
+    import cv2
+    import numpy as np
+    from PIL import Image
+    import pytesseract
+    HAS_CV = True
+except ImportError:
+    HAS_CV = False
+
 # Fallback options for Linux
 USING_FALLBACK = False
 HAS_XDOTOOL = False
@@ -51,6 +61,11 @@ def check_requirements():
         print("PyAutoGUI is not installed. Installing...")
         subprocess.run(["pip", "install", "pyautogui"], check=True)
         print("PyAutoGUI installed successfully.")
+    
+    if not HAS_CV:
+        print("Computer vision dependencies not installed. Installing...")
+        subprocess.run(["pip", "install", "opencv-python pytesseract pillow"], check=True)
+        print("Computer vision dependencies installed successfully.")
     
     # Check for X11 display
     display = os.environ.get('DISPLAY')
@@ -323,4 +338,369 @@ def highlight_area(x: int, y: int, width: int, height: int, duration: float = 1.
         return True
     except Exception as e:
         print(f"Error highlighting area: {e}")
-        return False 
+        return False
+
+def find_element(
+    screenshot_path: str = None,
+    element_type: str = None,
+    text: str = None,
+    reference_image: str = None,
+    search_area: List[int] = None,
+    confidence: float = 0.7,
+    debug: bool = False
+) -> Optional[Dict[str, Any]]:
+    """
+    Find a UI element on the screen using computer vision techniques.
+    
+    Args:
+        screenshot_path: Path to screenshot image (if None, a new screenshot will be taken)
+        element_type: Type of element to find ('button', 'input', 'checkbox', etc.)
+        text: Text content to match (using OCR)
+        reference_image: Path to reference image of the element
+        search_area: [x, y, width, height] to limit search area
+        confidence: Confidence threshold (0.0-1.0)
+        debug: Enable debug mode
+        
+    Returns:
+        Dictionary with element information or None if not found
+    """
+    check_requirements()
+    
+    if not HAS_CV:
+        print("Computer vision dependencies not installed. Cannot perform element detection.")
+        return None
+    
+    if not any([element_type, text, reference_image]):
+        print("ERROR: At least one of element_type, text, or reference_image must be provided")
+        return None
+    
+    try:
+        # Get screenshot if not provided
+        if screenshot_path is None:
+            # Take a screenshot
+            screenshot = pyautogui.screenshot()
+            screenshot_path = "temp_screenshot.png"
+            screenshot.save(screenshot_path)
+            print(f"Captured screenshot: {screenshot_path}")
+        
+        # Load the screenshot
+        image = cv2.imread(screenshot_path)
+        if image is None:
+            print(f"ERROR: Could not load image from {screenshot_path}")
+            return None
+        
+        # Convert to RGB for better processing
+        image_rgb = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
+        
+        # Apply search area if provided
+        if search_area and len(search_area) == 4:
+            x, y, w, h = search_area
+            image_rgb = image_rgb[y:y+h, x:x+w]
+            offset_x, offset_y = x, y
+        else:
+            offset_x, offset_y = 0, 0
+        
+        # Create a copy for visualization if debug is enabled
+        if debug:
+            debug_image = image_rgb.copy()
+        
+        # Initialize result
+        result = None
+        
+        # Method 1: Find by reference image (template matching)
+        if reference_image:
+            result = find_by_template(image_rgb, reference_image, confidence, debug)
+            if result:
+                result['x'] += offset_x
+                result['y'] += offset_y
+                print(f"Found element by template matching at ({result['x']}, {result['y']})")
+                return result
+        
+        # Method 2: Find by text using OCR
+        if text:
+            result = find_by_text(image_rgb, text, confidence, debug)
+            if result:
+                result['x'] += offset_x
+                result['y'] += offset_y
+                print(f"Found element by text '{text}' at ({result['x']}, {result['y']})")
+                return result
+        
+        # Method 3: Find by element type (heuristics and feature detection)
+        if element_type:
+            result = find_by_element_type(image_rgb, element_type, confidence, debug)
+            if result:
+                result['x'] += offset_x
+                result['y'] += offset_y
+                print(f"Found element of type '{element_type}' at ({result['x']}, {result['y']})")
+                return result
+        
+        print("Element not found")
+        return None
+    
+    except Exception as e:
+        print(f"Error finding element: {e}")
+        import traceback
+        traceback.print_exc()
+        return None
+    finally:
+        # Clean up temporary screenshot if we created one
+        if screenshot_path == "temp_screenshot.png" and os.path.exists(screenshot_path):
+            os.remove(screenshot_path)
+
+def find_by_template(image: np.ndarray, template_path: str, confidence: float, debug: bool) -> Optional[Dict[str, Any]]:
+    """Find element by template matching."""
+    try:
+        # Load template image
+        template = cv2.imread(template_path)
+        if template is None:
+            print(f"ERROR: Could not load template image from {template_path}")
+            return None
+        
+        template = cv2.cvtColor(template, cv2.COLOR_BGR2RGB)
+        
+        # Perform template matching
+        result = cv2.matchTemplate(image, template, cv2.TM_CCOEFF_NORMED)
+        
+        # Get best match location
+        min_val, max_val, min_loc, max_loc = cv2.minMaxLoc(result)
+        
+        # Check if the match is good enough
+        if max_val >= confidence:
+            # Get template dimensions
+            h, w = template.shape[:2]
+            
+            # Create result
+            return {
+                'x': max_loc[0],
+                'y': max_loc[1],
+                'width': w,
+                'height': h,
+                'confidence': float(max_val),
+                'method': 'template',
+                'center_x': max_loc[0] + w // 2,
+                'center_y': max_loc[1] + h // 2
+            }
+        
+        return None
+    except Exception as e:
+        print(f"Error in template matching: {e}")
+        return None
+
+def find_by_text(image: np.ndarray, text: str, confidence: float, debug: bool) -> Optional[Dict[str, Any]]:
+    """Find element by OCR text recognition."""
+    try:
+        # Convert image for OCR
+        pil_image = Image.fromarray(image)
+        
+        # Perform OCR
+        ocr_result = pytesseract.image_to_data(pil_image, output_type=pytesseract.Output.DICT)
+        
+        # Search for text
+        boxes = []
+        for i, word in enumerate(ocr_result['text']):
+            # Skip empty results
+            if not word.strip():
+                continue
+                
+            # Check if this word matches our target text
+            # Using lowercase and partial matching for more robust results
+            if text.lower() in word.lower() or word.lower() in text.lower():
+                confidence_score = float(ocr_result['conf'][i]) / 100.0
+                
+                # Only consider matches above confidence threshold
+                if confidence_score >= confidence:
+                    x = ocr_result['left'][i]
+                    y = ocr_result['top'][i]
+                    w = ocr_result['width'][i]
+                    h = ocr_result['height'][i]
+                    
+                    boxes.append({
+                        'x': x,
+                        'y': y,
+                        'width': w,
+                        'height': h,
+                        'confidence': confidence_score,
+                        'method': 'ocr',
+                        'text': word,
+                        'center_x': x + w // 2,
+                        'center_y': y + h // 2
+                    })
+        
+        # Return the best match
+        if boxes:
+            # Sort by confidence score, highest first
+            boxes.sort(key=lambda b: b['confidence'], reverse=True)
+            return boxes[0]
+        
+        return None
+    except Exception as e:
+        print(f"Error in OCR text detection: {e}")
+        return None
+
+def find_by_element_type(image: np.ndarray, element_type: str, confidence: float, debug: bool) -> Optional[Dict[str, Any]]:
+    """Find element by its type using heuristics and feature detection."""
+    try:
+        # Convert to grayscale for better processing
+        gray = cv2.cvtColor(image, cv2.COLOR_RGB2GRAY)
+        
+        # Different detection methods based on element type
+        if element_type.lower() == 'button':
+            # Look for rectangles with certain aspect ratios
+            # This is a simplified approach - real buttons have more complex features
+            return find_button(gray, confidence, debug)
+            
+        elif element_type.lower() == 'checkbox':
+            # Look for small squares
+            return find_checkbox(gray, confidence, debug)
+            
+        elif element_type.lower() == 'input':
+            # Look for rectangles with certain aspect ratios, often with text fields
+            return find_input(gray, confidence, debug)
+            
+        else:
+            print(f"Unsupported element type: {element_type}")
+            return None
+            
+    except Exception as e:
+        print(f"Error in element type detection: {e}")
+        return None
+
+def find_button(gray: np.ndarray, confidence: float, debug: bool) -> Optional[Dict[str, Any]]:
+    """Find button elements in grayscale image."""
+    # A simple implementation - detect rectangle shapes
+    # Use edge detection and contour finding
+    edges = cv2.Canny(gray, 50, 150)
+    contours, _ = cv2.findContours(edges, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+    
+    buttons = []
+    for contour in contours:
+        # Approximate the contour to a polygon
+        epsilon = 0.02 * cv2.arcLength(contour, True)
+        approx = cv2.approxPolyDP(contour, epsilon, True)
+        
+        # If the polygon has 4 points, it might be a rectangle/button
+        if len(approx) == 4:
+            x, y, w, h = cv2.boundingRect(approx)
+            
+            # Buttons usually have a certain aspect ratio
+            aspect_ratio = float(w) / h
+            
+            # Typical buttons have aspect ratios between 1.5 and 5
+            if 1.0 <= aspect_ratio <= 5.0 and w >= 30 and h >= 15:
+                # Calculate a confidence score based on how "button-like" it is
+                # This is a heuristic and can be improved
+                aspect_confidence = 1.0 - min(abs(aspect_ratio - 3.0) / 3.0, 1.0)
+                size_confidence = min(w * h / 5000.0, 1.0)
+                rect_confidence = aspect_confidence * 0.6 + size_confidence * 0.4
+                
+                if rect_confidence >= confidence:
+                    buttons.append({
+                        'x': x,
+                        'y': y,
+                        'width': w,
+                        'height': h,
+                        'confidence': rect_confidence,
+                        'method': 'button_detection',
+                        'center_x': x + w // 2,
+                        'center_y': y + h // 2
+                    })
+    
+    # Return the best match
+    if buttons:
+        # Sort by confidence score, highest first
+        buttons.sort(key=lambda b: b['confidence'], reverse=True)
+        return buttons[0]
+    
+    return None
+
+def find_checkbox(gray: np.ndarray, confidence: float, debug: bool) -> Optional[Dict[str, Any]]:
+    """Find checkbox elements in grayscale image."""
+    # Look for small squares
+    edges = cv2.Canny(gray, 50, 150)
+    contours, _ = cv2.findContours(edges, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+    
+    checkboxes = []
+    for contour in contours:
+        # Approximate the contour to a polygon
+        epsilon = 0.02 * cv2.arcLength(contour, True)
+        approx = cv2.approxPolyDP(contour, epsilon, True)
+        
+        # If the polygon has 4 points, it might be a square/checkbox
+        if len(approx) == 4:
+            x, y, w, h = cv2.boundingRect(approx)
+            
+            # Checkboxes are usually square
+            aspect_ratio = float(w) / h
+            
+            # Typical checkboxes are square and small
+            if 0.8 <= aspect_ratio <= 1.2 and 10 <= w <= 40 and 10 <= h <= 40:
+                # Calculate confidence
+                aspect_confidence = 1.0 - min(abs(aspect_ratio - 1.0) / 0.5, 1.0)
+                size_confidence = 1.0 - min(abs(w - 20) / 30.0, 1.0)
+                checkbox_confidence = aspect_confidence * 0.7 + size_confidence * 0.3
+                
+                if checkbox_confidence >= confidence:
+                    checkboxes.append({
+                        'x': x,
+                        'y': y,
+                        'width': w,
+                        'height': h,
+                        'confidence': checkbox_confidence,
+                        'method': 'checkbox_detection',
+                        'center_x': x + w // 2,
+                        'center_y': y + h // 2
+                    })
+    
+    # Return the best match
+    if checkboxes:
+        # Sort by confidence score, highest first
+        checkboxes.sort(key=lambda b: b['confidence'], reverse=True)
+        return checkboxes[0]
+    
+    return None
+
+def find_input(gray: np.ndarray, confidence: float, debug: bool) -> Optional[Dict[str, Any]]:
+    """Find input field elements in grayscale image."""
+    # Look for rectangles with higher width than height
+    edges = cv2.Canny(gray, 50, 150)
+    contours, _ = cv2.findContours(edges, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+    
+    inputs = []
+    for contour in contours:
+        # Approximate the contour to a polygon
+        epsilon = 0.02 * cv2.arcLength(contour, True)
+        approx = cv2.approxPolyDP(contour, epsilon, True)
+        
+        # If the polygon has 4 points, it might be a rectangle/input
+        if len(approx) == 4:
+            x, y, w, h = cv2.boundingRect(approx)
+            
+            # Input fields usually have a specific aspect ratio
+            aspect_ratio = float(w) / h
+            
+            # Typical input fields are wider than tall
+            if 3.0 <= aspect_ratio <= 20.0 and w >= 100 and 20 <= h <= 50:
+                # Calculate confidence
+                aspect_confidence = 1.0 - min(abs(aspect_ratio - 10.0) / 10.0, 1.0)
+                size_confidence = min(w / 300.0, 1.0) if w < 300 else min(300.0 / w, 1.0)
+                input_confidence = aspect_confidence * 0.5 + size_confidence * 0.5
+                
+                if input_confidence >= confidence:
+                    inputs.append({
+                        'x': x,
+                        'y': y,
+                        'width': w,
+                        'height': h,
+                        'confidence': input_confidence,
+                        'method': 'input_detection',
+                        'center_x': x + w // 2,
+                        'center_y': y + h // 2
+                    })
+    
+    # Return the best match
+    if inputs:
+        # Sort by confidence score, highest first
+        inputs.sort(key=lambda b: b['confidence'], reverse=True)
+        return inputs[0]
+    
+    return None 

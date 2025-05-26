@@ -1,0 +1,13 @@
+{
+  "basic_info": {
+    "format": "JPEG",
+    "size": [
+      1920,
+      1080
+    ],
+    "mode": "RGB",
+    "file_size": 186478
+  },
+  "text_content": "526 150744 analys\n\nFile Edit Selection View Go Run\n\nBO & wy\n\nY cursor-cv-mcp\n\nVv\n\nmcp_cv_tool\n\n'@ screensnot.py\n\n\u00ae serverpy\n\n>\n\n7\u00b0 Oe\u00a2crert rae\n\nBS nS blk\n\nfa\n\ntests\nvenv\n\ncoverage\n\ncursor_helperpy\ncursor_plugin.py\ncursor-interact\n\nDockerfile\n\nget_scree\n\nshot_with_analysis.py\nget_screenshot.py\n\nplugin.json\n\npyproject.toml\n\nREADME.md\n\nscreenshot\nscreenshot_20250526_150744_analysis.json\nscreenshot_20250526_150744.jpg\nscreenshot_20250526_150759_analysis.json\nscreenshot_20250526_150759.jpg\nscreenshot_20250526_151031_analysis.json\nscreenshot_20250526_151031.jpg\nscreenshot_20250526_151221_analysis.json\nscreenshot_20250526_151221.jpg\n\nml_practise\n\n{} screenshot_20250526_150744_analysis.json X\n\ncursor-cv-mcp > {} screenshot_20250526_150744_analysis.json > EJ text_content\n\n11 * att klicka...\\nOla Blom 13:51\\nHar du hoppat in i kanalen? Jag hittal\n\nProblems Output Debug Console Terminal Ports\n\njayb@debian:~/projects/ml_practise$\n\nCtrl+k to generate a command\n\ngbash +r \u00a7b [\n\n$\n\n$+ Ds x\n(venv) Jayo@aepian:~/projects,\n\nBased on the screenshots, I can see:\n\nOn monitor 0 (which spans both\n\nphysical displays):\n\n* Discord is open showing the \"TH\nAl-Utvecklare\" server\n\n\u00a2 There's a voice channel with a user\nnamed \"JanneB\" who appears to\nbe sharing their screen\n\n\u00a9 The #chatter channel is open\n\nThe interface shows the server\nnavigation on the left, channel list,\nand chat area\n\nOn monitor 2 (which is the right\ndisplay):\n\n* Discord is showing the \"#chatter\"\nchannel in the \"TH Al-Utvecklare\"\nserver\n\n* Ican see a message that says \"I\nam thankful for you letting me free\nand wil...\" which appears to be one\n\n> Generating.. Stop\n\nAdd context\n\nco Agent ctris1 ~ claud... ~ Ga\n\n",
+  "analysis": null
+}

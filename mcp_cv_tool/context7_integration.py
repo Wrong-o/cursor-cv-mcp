@@ -8,7 +8,7 @@ import os
 from typing import Dict, Any, Optional, List, Tuple
 
 from .screenshot import get_screenshot_with_analysis, analyze_image, get_available_monitors
-from .automation import mouse_click, type_text, press_key, get_screen_position, highlight_area
+from .automation import mouse_click, type_text, press_key, get_screen_position, highlight_area, find_element
 
 def mcp_screenshot_capture(params: Dict[str, Any]) -> Dict[str, Any]:
     """
@@ -299,6 +299,81 @@ def mcp_highlight_area(params: Dict[str, Any]) -> Dict[str, Any]:
         "duration": duration
     }
 
+def mcp_find_element(params: Dict[str, Any]) -> Dict[str, Any]:
+    """
+    Context7-style function to find UI elements on the screen using computer vision.
+    
+    Parameters:
+    - screenshot_path: Path to screenshot image (optional, will capture a new one if not provided)
+    - element_type: Type of element to find (button, input, checkbox) (optional)
+    - text: Text content to match (optional)
+    - reference_image: Path to reference image of element (optional)
+    - search_area: [x, y, width, height] to limit search area (optional)
+    - confidence: Confidence threshold (default: 0.7)
+    - debug: Enable debug mode (default: false)
+    
+    Returns:
+    - Dictionary containing:
+      - success: Boolean indicating success
+      - element: Element information (position, size, confidence)
+      - error: Error message if unsuccessful
+    """
+    # Validate parameters
+    screenshot_path = params.get("screenshot_path")
+    element_type = params.get("element_type")
+    text = params.get("text")
+    reference_image = params.get("reference_image")
+    search_area = params.get("search_area")
+    confidence = params.get("confidence", 0.7)
+    debug = params.get("debug", False)
+    
+    # Check if at least one search method is provided
+    if not any([element_type, text, reference_image]):
+        return {
+            "success": False,
+            "error": "At least one of element_type, text, or reference_image must be provided"
+        }
+    
+    # Capture a screenshot if needed
+    if not screenshot_path:
+        screenshot_result = mcp_screenshot_capture({"debug": debug})
+        if not screenshot_result.get("success"):
+            return {
+                "success": False,
+                "error": "Failed to capture screenshot"
+            }
+        screenshot_path = screenshot_result.get("screenshot_path")
+    
+    # Call the find_element function
+    try:
+        element = find_element(
+            screenshot_path=screenshot_path,
+            element_type=element_type,
+            text=text,
+            reference_image=reference_image,
+            search_area=search_area,
+            confidence=confidence,
+            debug=debug
+        )
+        
+        if not element:
+            return {
+                "success": False,
+                "error": "Element not found"
+            }
+        
+        # Return element information
+        return {
+            "success": True,
+            "element": element,
+            "message": f"Found element using method '{element.get('method')}' with confidence {element.get('confidence'):.2f}"
+        }
+    except Exception as e:
+        return {
+            "success": False,
+            "error": str(e)
+        }
+
 # Function registry mapping function names to their implementations
 FUNCTION_REGISTRY = {
     "mcp_screenshot_capture": mcp_screenshot_capture,
@@ -310,6 +385,7 @@ FUNCTION_REGISTRY = {
     "mcp_press_key": mcp_press_key,
     "mcp_get_mouse_position": mcp_get_mouse_position,
     "mcp_highlight_area": mcp_highlight_area,
+    "mcp_find_element": mcp_find_element,
 }
 
 def call_function(function_name: str, params: Dict[str, Any]) -> Dict[str, Any]:
