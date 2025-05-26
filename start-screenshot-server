@@ -1,0 +1,22 @@
+#!/bin/bash
+# Script to start the screenshot server
+
+# Change to the project directory
+cd /home/jayb/projects/ml_practise/cursor-cv-mcp
+
+# Activate the virtual environment
+source venv/bin/activate
+
+# Ensure X11 display is accessible
+export DISPLAY=:0
+export XAUTHORITY=~/.Xauthority
+
+# Ensure PyAutoGUI has permission to control the display
+# For some systems, you might need:
+# xhost +local:
+
+# Start the server
+echo "Starting screenshot server on port 8001..."
+echo "DISPLAY=$DISPLAY"
+echo "Using X11 for screen control"
+uvicorn mcp_cv_tool.server:app --port 8001 --host 0.0.0.0 

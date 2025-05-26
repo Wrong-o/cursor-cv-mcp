@@ -1,0 +1,144 @@
+#!/usr/bin/env python3
+"""
+Command-line tool for screen interaction.
+Allows clicking and typing on the screen from the command line.
+"""
+
+import os
+import sys
+import argparse
+import subprocess
+
+# Path to the venv python
+VENV_PATH = "/home/jayb/projects/ml_practise/cursor-cv-mcp/venv/bin/python"
+PROJECT_PATH = "/home/jayb/projects/ml_practise/cursor-cv-mcp"
+
+def run_in_venv(script):
+    """Run Python code in the virtual environment."""
+    
+    # Create a temporary script file
+    script_path = os.path.join("/tmp", "cursor_interact_script.py")
+    with open(script_path, "w") as f:
+        f.write(script)
+    
+    # Make it executable
+    os.chmod(script_path, 0o755)
+    
+    # Run the script in the venv
+    cmd = [VENV_PATH, script_path]
+    result = subprocess.run(cmd, check=False)
+    
+    # Clean up
+    os.remove(script_path)
+    
+    return result.returncode
+
+def click_command(args):
+    """Click at specified coordinates."""
+    script = f"""
+import sys
+sys.path.append("{PROJECT_PATH}")
+from mcp_cv_tool.automation import mouse_click
+
+mouse_click({args.x}, {args.y}, button="{args.button}", clicks={args.clicks})
+"""
+    return run_in_venv(script)
+
+def type_command(args):
+    """Type text at current cursor position."""
+    script = f"""
+import sys
+sys.path.append("{PROJECT_PATH}")
+from mcp_cv_tool.automation import type_text
+
+type_text("{args.text}", interval={args.interval})
+"""
+    return run_in_venv(script)
+
+def press_command(args):
+    """Press a key."""
+    script = f"""
+import sys
+sys.path.append("{PROJECT_PATH}")
+from mcp_cv_tool.automation import press_key
+
+press_key("{args.key}")
+"""
+    return run_in_venv(script)
+
+def position_command(args):
+    """Get current mouse position."""
+    script = f"""
+import sys
+sys.path.append("{PROJECT_PATH}")
+from mcp_cv_tool.automation import get_screen_position
+
+get_screen_position()
+"""
+    return run_in_venv(script)
+
+def highlight_command(args):
+    """Highlight an area on the screen."""
+    script = f"""
+import sys
+sys.path.append("{PROJECT_PATH}")
+from mcp_cv_tool.automation import highlight_area
+
+highlight_area({args.x}, {args.y}, {args.width}, {args.height}, duration={args.duration})
+"""
+    return run_in_venv(script)
+
+def main():
+    """Main entry point for the command-line tool."""
+    parser = argparse.ArgumentParser(description="Screen interaction tool")
+    subparsers = parser.add_subparsers(dest="command", help="Command to execute")
+    
+    # Click command
+    click_parser = subparsers.add_parser("click", help="Click at specified coordinates")
+    click_parser.add_argument("x", type=int, help="X coordinate")
+    click_parser.add_argument("y", type=int, help="Y coordinate")
+    click_parser.add_argument("--button", choices=["left", "right", "middle"], default="left", help="Mouse button")
+    click_parser.add_argument("--clicks", type=int, default=1, help="Number of clicks")
+    
+    # Type command
+    type_parser = subparsers.add_parser("type", help="Type text at current cursor position")
+    type_parser.add_argument("text", help="Text to type")
+    type_parser.add_argument("--interval", type=float, default=0.05, help="Interval between keystrokes")
+    
+    # Press command
+    press_parser = subparsers.add_parser("press", help="Press a key")
+    press_parser.add_argument("key", help="Key to press (e.g., 'enter', 'tab', 'esc')")
+    
+    # Position command
+    position_parser = subparsers.add_parser("position", help="Get current mouse position")
+    
+    # Highlight command
+    highlight_parser = subparsers.add_parser("highlight", help="Highlight an area on the screen")
+    highlight_parser.add_argument("x", type=int, help="X coordinate of top-left corner")
+    highlight_parser.add_argument("y", type=int, help="Y coordinate of top-left corner")
+    highlight_parser.add_argument("width", type=int, help="Width of area")
+    highlight_parser.add_argument("height", type=int, help="Height of area")
+    highlight_parser.add_argument("--duration", type=float, default=1.0, help="Duration of highlight in seconds")
+    
+    args = parser.parse_args()
+    
+    if not args.command:
+        parser.print_help()
+        return 1
+    
+    # Execute the appropriate command
+    if args.command == "click":
+        return click_command(args)
+    elif args.command == "type":
+        return type_command(args)
+    elif args.command == "press":
+        return press_command(args)
+    elif args.command == "position":
+        return position_command(args)
+    elif args.command == "highlight":
+        return highlight_command(args)
+    
+    return 0
+
+if __name__ == "__main__":
+    sys.exit(main()) 

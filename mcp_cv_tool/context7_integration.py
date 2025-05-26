@@ -1,0 +1,340 @@
+"""
+Context7-like integration for the screenshot functionality.
+This provides a standardized interface similar to Context7 for screenshot capture and analysis.
+"""
+
+import json
+import os
+from typing import Dict, Any, Optional, List, Tuple
+
+from .screenshot import get_screenshot_with_analysis, analyze_image, get_available_monitors
+from .automation import mouse_click, type_text, press_key, get_screen_position, highlight_area
+
+def mcp_screenshot_capture(params: Dict[str, Any]) -> Dict[str, Any]:
+    """
+    Context7-style function to capture a screenshot and analyze it.
+    
+    Parameters:
+    - monitor: Monitor number to capture (default: 0)
+    - output_file: Path to save the screenshot (optional)
+    - debug: Enable debug mode (default: False)
+    - analyze: Perform analysis on the image (default: True)
+    
+    Returns:
+    - Dictionary containing:
+      - success: Boolean indicating success
+      - screenshot_path: Path to the saved screenshot
+      - resolution: Image resolution
+      - analysis: Analysis results if requested
+    """
+    monitor = params.get("monitor", 0)
+    output_file = params.get("output_file", None)
+    debug = params.get("debug", False)
+    analyze_flag = params.get("analyze", True)
+    
+    # Capture screenshot
+    screenshot_path, analysis = get_screenshot_with_analysis(
+        monitor=monitor,
+        output_file=output_file,
+        debug=debug
+    )
+    
+    # Prepare response
+    response = {
+        "success": screenshot_path is not None,
+        "screenshot_path": screenshot_path,
+        "resolution": analysis.get("basic_info", {}).get("size", None) if analysis else None,
+    }
+    
+    # Include analysis if requested
+    if analyze_flag and analysis:
+        response["analysis"] = analysis
+    
+    return response
+
+def mcp_screenshot_analyze_image(params: Dict[str, Any]) -> Dict[str, Any]:
+    """
+    Context7-style function to analyze an existing image.
+    
+    Parameters:
+    - image_path: Path to the image file to analyze
+    
+    Returns:
+    - Dictionary containing:
+      - success: Boolean indicating success
+      - analysis: Analysis results
+    """
+    image_path = params.get("image_path")
+    
+    if not image_path or not os.path.exists(image_path):
+        return {
+            "success": False,
+            "error": f"Image file not found: {image_path}",
+        }
+    
+    # Analyze image
+    analysis = analyze_image(image_path)
+    
+    return {
+        "success": analysis is not None,
+        "analysis": analysis,
+    }
+
+def mcp_screenshot_list_monitors(params: Dict[str, Any]) -> Dict[str, Any]:
+    """
+    Context7-style function to list available monitors.
+    
+    Parameters:
+    - None required
+    
+    Returns:
+    - Dictionary containing:
+      - success: Boolean indicating success
+      - monitors: List of monitor information
+      - primary: Primary monitor index
+    """
+    try:
+        # Use the internal function directly
+        monitors_info = get_available_monitors()
+        
+        if not monitors_info:
+            return {
+                "success": False,
+                "error": "Failed to retrieve monitor information",
+            }
+        
+        return {
+            "success": True,
+            "monitors": monitors_info.get("monitors", []),
+            "primary": monitors_info.get("primary", 0),
+        }
+    except Exception as e:
+        return {
+            "success": False,
+            "error": f"Error retrieving monitor information: {str(e)}",
+        }
+
+def mcp_test_function(params: Dict[str, Any]) -> Dict[str, Any]:
+    """
+    Simple test function that doesn't use any screenshot functionality.
+    
+    Parameters:
+    - message: A test message (optional)
+    
+    Returns:
+    - Dictionary containing:
+      - success: Boolean indicating success
+      - message: Echo of the input message or default message
+    """
+    message = params.get("message", "Hello from MCP test function!")
+    
+    return {
+        "success": True,
+        "message": message,
+    }
+
+def mcp_mouse_click(params: Dict[str, Any]) -> Dict[str, Any]:
+    """
+    Context7-style function to click at a specific screen position.
+    
+    Parameters:
+    - x: X coordinate (required)
+    - y: Y coordinate (required)
+    - button: Mouse button ('left', 'right', 'middle') (default: 'left')
+    - clicks: Number of clicks (default: 1)
+    
+    Returns:
+    - Dictionary containing:
+      - success: Boolean indicating success
+      - position: [x, y] coordinates where clicked
+      - button: Button used for clicking
+      - clicks: Number of clicks performed
+    """
+    x = params.get("x")
+    y = params.get("y")
+    
+    if x is None or y is None:
+        return {
+            "success": False,
+            "error": "Missing required parameters: x and y coordinates are required"
+        }
+    
+    button = params.get("button", "left")
+    clicks = params.get("clicks", 1)
+    
+    success = mouse_click(x=x, y=y, button=button, clicks=clicks)
+    
+    return {
+        "success": success,
+        "position": [x, y],
+        "button": button,
+        "clicks": clicks
+    }
+
+def mcp_type_text(params: Dict[str, Any]) -> Dict[str, Any]:
+    """
+    Context7-style function to type text at the current cursor position.
+    
+    Parameters:
+    - text: Text to type (required)
+    - interval: Time interval between keystrokes in seconds (default: 0.05)
+    
+    Returns:
+    - Dictionary containing:
+      - success: Boolean indicating success
+      - text: Text that was typed
+      - interval: Interval used
+    """
+    text = params.get("text")
+    
+    if text is None:
+        return {
+            "success": False,
+            "error": "Missing required parameter: text is required"
+        }
+    
+    interval = params.get("interval", 0.05)
+    
+    success = type_text(text=text, interval=interval)
+    
+    return {
+        "success": success,
+        "text": text,
+        "interval": interval
+    }
+
+def mcp_press_key(params: Dict[str, Any]) -> Dict[str, Any]:
+    """
+    Context7-style function to press a specific key.
+    
+    Parameters:
+    - key: Key to press (e.g., 'enter', 'tab', 'esc') (required)
+    
+    Returns:
+    - Dictionary containing:
+      - success: Boolean indicating success
+      - key: Key that was pressed
+    """
+    key = params.get("key")
+    
+    if key is None:
+        return {
+            "success": False,
+            "error": "Missing required parameter: key is required"
+        }
+    
+    success = press_key(key=key)
+    
+    return {
+        "success": success,
+        "key": key
+    }
+
+def mcp_get_mouse_position(params: Dict[str, Any]) -> Dict[str, Any]:
+    """
+    Context7-style function to get the current mouse position.
+    
+    Parameters:
+    - None required
+    
+    Returns:
+    - Dictionary containing:
+      - success: Boolean indicating success
+      - position: [x, y] coordinates of the mouse
+    """
+    try:
+        position = get_screen_position()
+        
+        # Return in a format that matches our MCPCallResponse model
+        return {
+            "success": True,
+            "position": list(position),
+            "message": f"Current position: {position[0]}, {position[1]}"
+        }
+    except Exception as e:
+        return {
+            "success": False,
+            "error": str(e)
+        }
+
+def mcp_highlight_area(params: Dict[str, Any]) -> Dict[str, Any]:
+    """
+    Context7-style function to highlight an area on the screen.
+    
+    Parameters:
+    - x: X coordinate of top-left corner (required)
+    - y: Y coordinate of top-left corner (required)
+    - width: Width of area (required)
+    - height: Height of area (required)
+    - duration: Duration of highlight in seconds (default: 1.0)
+    
+    Returns:
+    - Dictionary containing:
+      - success: Boolean indicating success
+      - area: Details of the highlighted area
+    """
+    x = params.get("x")
+    y = params.get("y")
+    width = params.get("width")
+    height = params.get("height")
+    
+    if None in (x, y, width, height):
+        return {
+            "success": False,
+            "error": "Missing required parameters: x, y, width, and height are required"
+        }
+    
+    duration = params.get("duration", 1.0)
+    
+    success = highlight_area(x=x, y=y, width=width, height=height, duration=duration)
+    
+    return {
+        "success": success,
+        "area": {
+            "x": x,
+            "y": y,
+            "width": width,
+            "height": height
+        },
+        "duration": duration
+    }
+
+# Function registry mapping function names to their implementations
+FUNCTION_REGISTRY = {
+    "mcp_screenshot_capture": mcp_screenshot_capture,
+    "mcp_screenshot_analyze_image": mcp_screenshot_analyze_image,
+    "mcp_screenshot_list_monitors": mcp_screenshot_list_monitors,
+    "mcp_test_function": mcp_test_function,
+    "mcp_mouse_click": mcp_mouse_click,
+    "mcp_type_text": mcp_type_text,
+    "mcp_press_key": mcp_press_key,
+    "mcp_get_mouse_position": mcp_get_mouse_position,
+    "mcp_highlight_area": mcp_highlight_area,
+}
+
+def call_function(function_name: str, params: Dict[str, Any]) -> Dict[str, Any]:
+    """
+    Call a function by name with the given parameters.
+    
+    Args:
+        function_name: Name of the function to call
+        params: Parameters to pass to the function
+        
+    Returns:
+        Result of the function call
+    """
+    if function_name not in FUNCTION_REGISTRY:
+        return {
+            "success": False,
+            "error": f"Unknown function: {function_name}",
+            "available_functions": list(FUNCTION_REGISTRY.keys()),
+        }
+    
+    try:
+        return FUNCTION_REGISTRY[function_name](params)
+    except Exception as e:
+        return {
+            "success": False,
+            "error": str(e),
+            "function": function_name,
+        } 

@@ -1,0 +1,8 @@
+#!/bin/bash
+# Simple screenshot wrapper script that can be called from any Cursor session
+
+# Activate the virtual environment
+source /home/jayb/projects/ml_practise/cursor-cv-mcp/venv/bin/activate
+
+# Run the helper script with any arguments passed
+python /home/jayb/projects/ml_practise/cursor-cv-mcp/cursor_helper.py "$@" 

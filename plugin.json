@@ -1,0 +1,23 @@
+{
+    "name": "screenshot-ocr",
+    "version": "1.0.0",
+    "entry": "cursor_plugin.py",
+    "description": "Screenshot and OCR Plugin for Cursor",
+    "commands": [
+        {
+            "name": "screenshot",
+            "description": "Capture and analyze screenshots",
+            "patterns": [
+                "use screenshot",
+                "take screenshot",
+                "screenshot of monitor"
+            ]
+        }
+    ],
+    "triggers": [
+        {
+            "pattern": "fix.*position.*screenshot",
+            "command": "screenshot"
+        }
+    ]
+} 
