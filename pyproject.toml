@@ -61,7 +61,7 @@ addopts = "--cov=mcp_cv_tool --cov-report=term-missing -v"
 [tool.ruff]
 line-length = 88
 target-version = "py39"
-select = ["E", "F", "B", "I", "N", "UP", "PL", "RUF"]
+select = ["E", "F", "B", "I", "N", "UP", "PL", "RUF"] 
 
 [tool.hatch.build.targets.wheel]
 packages = ["mcp_cv_tool"] 

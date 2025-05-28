@@ -5,7 +5,7 @@ Provides real-time screen capture data through Server-Sent Events.
 
 import asyncio
 from contextlib import asynccontextmanager
-from typing import AsyncGenerator, Optional, List, Dict, Any, Tuple
+from typing import AsyncGenerator, Optional, List, Dict, Any, Tuple, Union
 
 import cv2
 import numpy as np
@@ -225,7 +225,7 @@ class MCPCallResponse(BaseModel):
     error: Optional[str] = None
     message: Optional[str] = None
     screenshot_path: Optional[str] = None
-    resolution: Optional[str] = None
+    resolution: Optional[Union[str, tuple[int, int]]] = None
     analysis: Optional[Dict[str, Any]] = None
     monitors: Optional[List[Dict[str, Any]]] = None
     primary: Optional[int] = None

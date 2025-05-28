@@ -113,8 +113,8 @@ def test_global_exception_handler(test_client):
     try:
         with create_test_endpoint(app) as path:
             response = test_client.get(path)
-            assert response.status_code == 500
-            assert response.json() == {"error": "Internal server error"}
+    assert response.status_code == 500
+    assert response.json() == {"error": "Internal server error"} 
     except ValueError:
         # The test client might re-raise the exception, which is fine
         # We've confirmed the endpoint is registered and the handler exists

@@ -35,6 +35,15 @@ except ImportError:
 import mss
 import mss.tools
 
+try:
+    from .config import get_screenshots_dir
+    HAS_CONFIG = True
+except ImportError:
+    HAS_CONFIG = False
+
+# Define a default screenshots directory (can be overridden)
+SCREENSHOTS_DIR = get_screenshots_dir() if HAS_CONFIG else os.path.expanduser("~/screenshots")
+
 def get_available_monitors(url: str = "http://localhost:8001/health") -> Optional[Dict[str, Any]]:
     """
     Get information about available monitors directly using mss.
@@ -80,7 +89,8 @@ def get_screenshot_with_analysis(
     url: str = "http://localhost:8001/sse",  # Kept for backward compatibility
     output_file: Optional[str] = None,
     monitor: int = 0,
-    debug: bool = False
+    debug: bool = False,
+    screenshots_dir: Optional[str] = None
 ) -> Tuple[Optional[str], Optional[Dict[str, Any]]]:
     """
     Capture a screenshot directly using mss, save it, and analyze its content.
@@ -90,13 +100,23 @@ def get_screenshot_with_analysis(
         output_file: The output file path, defaults to timestamp-based filename
         monitor: Monitor number to capture (default: 0)
         debug: Whether to print debug information
+        screenshots_dir: Directory to save screenshots (default: SCREENSHOTS_DIR)
     
     Returns:
         Tuple of (Path to the saved screenshot file, Analysis results)
     """
+    # Use the provided screenshots directory or fall back to the default
+    target_dir = screenshots_dir if screenshots_dir is not None else SCREENSHOTS_DIR
+    
+    # Create the directory if it doesn't exist
+    os.makedirs(target_dir, exist_ok=True)
+    
     if output_file is None:
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        output_file = f"screenshot_{timestamp}.jpg"
+        output_file = os.path.join(target_dir, f"screenshot_{timestamp}.jpg")
+    elif not os.path.isabs(output_file):
+        # If output_file is not an absolute path, join it with target_dir
+        output_file = os.path.join(target_dir, output_file)
     
     try:
         # Get monitor information

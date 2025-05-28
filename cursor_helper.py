@@ -8,7 +8,7 @@ import os
 import sys
 import json
 from datetime import datetime
-from mcp_cv_tool.screenshot import get_screenshot_with_analysis
+from mcp_cv_tool.screenshot import get_screenshot_with_analysis, SCREENSHOTS_DIR
 
 def take_screenshot_for_cursor():
     """Take a screenshot and format output for Cursor."""
@@ -21,13 +21,18 @@ def take_screenshot_for_cursor():
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     output_file = f"cursor_screenshot_{timestamp}.jpg"
     
+    # Create screenshots directory if needed
+    screenshots_dir = os.path.join(os.getcwd(), "screenshots")
+    os.makedirs(screenshots_dir, exist_ok=True)
+    
     print(f"Taking screenshot from monitor {monitor}...")
     
     # Take the screenshot
     screenshot_path, analysis = get_screenshot_with_analysis(
         url="http://localhost:8001/sse",
         output_file=output_file,
-        monitor=monitor
+        monitor=monitor,
+        screenshots_dir=screenshots_dir
     )
     
     if not screenshot_path:

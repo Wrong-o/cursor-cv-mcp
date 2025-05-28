@@ -1,84 +1,133 @@
 <!DOCTYPE html>
-<html lang="en">
+<html>
 <head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Element Detection Test Page</title>
+    <title>Test Form</title>
     <style>
         body {
             font-family: Arial, sans-serif;
-            max-width: 800px;
-            margin: 0 auto;
+            margin: 0;
             padding: 20px;
+            background-color: #f5f5f5;
+        }
+        .container {
+            max-width: 600px;
+            margin: 0 auto;
+            background-color: white;
+            padding: 30px;
+            border-radius: 8px;
+            box-shadow: 0 2px 10px rgba(0,0,0,0.1);
+        }
+        h1 {
+            color: #333;
+            margin-top: 0;
         }
         .form-group {
-            margin-bottom: 15px;
+            margin-bottom: 20px;
         }
         label {
             display: block;
             margin-bottom: 5px;
+            font-weight: bold;
         }
-        input[type="text"], input[type="email"], textarea {
+        input[type="text"],
+        input[type="email"],
+        textarea {
             width: 100%;
-            padding: 8px;
+            padding: 10px;
             border: 1px solid #ddd;
             border-radius: 4px;
+            font-size: 16px;
+            box-sizing: border-box;
+        }
+        textarea {
+            height: 100px;
+            resize: vertical;
+        }
+        .checkbox-group {
+            margin-bottom: 5px;
         }
         button {
             background-color: #4CAF50;
             color: white;
-            padding: 10px 15px;
             border: none;
+            padding: 12px 20px;
             border-radius: 4px;
             cursor: pointer;
+            font-size: 16px;
         }
         button:hover {
             background-color: #45a049;
         }
-        .checkbox-group {
-            margin: 10px 0;
+        #result {
+            margin-top: 20px;
+            padding: 15px;
+            border-radius: 4px;
+            display: none;
+        }
+        .success {
+            background-color: #dff0d8;
+            color: #3c763d;
         }
     </style>
 </head>
 <body>
-    <h1>Element Detection Test Page</h1>
-    
-    <form id="test-form">
-        <div class="form-group">
-            <label for="name">Name:</label>
-            <input type="text" id="name" name="name" placeholder="Enter your name">
-        </div>
+    <div class="container">
+        <h1>Test Form</h1>
+        <form id="testForm">
+            <div class="form-group">
+                <label for="name">Name:</label>
+                <input type="text" id="name" name="name" placeholder="Enter your name">
+            </div>
+            
+            <div class="form-group">
+                <label for="email">Email:</label>
+                <input type="email" id="email" name="email" placeholder="Enter your email">
+            </div>
+            
+            <div class="form-group">
+                <label for="message">Message:</label>
+                <textarea id="message" name="message" placeholder="Enter your message"></textarea>
+            </div>
+            
+            <div class="form-group">
+                <div class="checkbox-group">
+                    <input type="checkbox" id="option1" name="option1">
+                    <label for="option1" style="display: inline;">Option 1</label>
+                </div>
+                <div class="checkbox-group">
+                    <input type="checkbox" id="option2" name="option2">
+                    <label for="option2" style="display: inline;">Option 2</label>
+                </div>
+            </div>
+            
+            <button type="submit">Submit</button>
+        </form>
         
-        <div class="form-group">
-            <label for="email">Email:</label>
-            <input type="email" id="email" name="email" placeholder="Enter your email">
-        </div>
-        
-        <div class="form-group">
-            <label for="message">Message:</label>
-            <textarea id="message" name="message" rows="4" placeholder="Enter your message"></textarea>
-        </div>
-        
-        <div class="checkbox-group">
-            <input type="checkbox" id="subscribe" name="subscribe">
-            <label for="subscribe">Subscribe to newsletter</label>
-        </div>
-        
-        <div class="checkbox-group">
-            <input type="checkbox" id="terms" name="terms">
-            <label for="terms">I agree to the terms and conditions</label>
-        </div>
-        
-        <div class="form-group">
-            <button type="submit" id="submit-btn">Submit</button>
-            <button type="reset" id="reset-btn">Reset</button>
-        </div>
-    </form>
-    
+        <div id="result"></div>
+    </div>
+
     <script>
-        document.getElementById('test-form').addEventListener('submit', function(e) {
+        document.getElementById('testForm').addEventListener('submit', function(e) {
             e.preventDefault();
-            alert('Form submitted!');
+            
+            // Get form values
+            const name = document.getElementById('name').value;
+            const email = document.getElementById('email').value;
+            const message = document.getElementById('message').value;
+            const option1 = document.getElementById('option1').checked;
+            const option2 = document.getElementById('option2').checked;
+            
+            // Display result
+            const resultDiv = document.getElementById('result');
+            resultDiv.innerHTML = `
+                <h3>Form Submission Successful!</h3>
+                <p><strong>Name:</strong> ${name}</p>
+                <p><strong>Email:</strong> ${email}</p>
+                <p><strong>Message:</strong> ${message}</p>
+                <p><strong>Options:</strong> ${option1 ? 'Option 1' : ''} ${option1 && option2 ? ',' : ''} ${option2 ? 'Option 2' : ''}</p>
+            `;
+            resultDiv.classList.add('success');
+            resultDiv.style.display = 'block';
         });
     </script>
 </body>

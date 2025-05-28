@@ -19,6 +19,7 @@ def mcp_screenshot_capture(params: Dict[str, Any]) -> Dict[str, Any]:
     - output_file: Path to save the screenshot (optional)
     - debug: Enable debug mode (default: False)
     - analyze: Perform analysis on the image (default: True)
+    - screenshots_dir: Directory to save screenshots (optional)
     
     Returns:
     - Dictionary containing:
@@ -31,12 +32,14 @@ def mcp_screenshot_capture(params: Dict[str, Any]) -> Dict[str, Any]:
     output_file = params.get("output_file", None)
     debug = params.get("debug", False)
     analyze_flag = params.get("analyze", True)
+    screenshots_dir = params.get("screenshots_dir", None)
     
     # Capture screenshot
     screenshot_path, analysis = get_screenshot_with_analysis(
         monitor=monitor,
         output_file=output_file,
-        debug=debug
+        debug=debug,
+        screenshots_dir=screenshots_dir
     )
     
     # Prepare response
@@ -142,6 +145,7 @@ def mcp_mouse_click(params: Dict[str, Any]) -> Dict[str, Any]:
     - y: Y coordinate (required)
     - button: Mouse button ('left', 'right', 'middle') (default: 'left')
     - clicks: Number of clicks (default: 1)
+    - monitor: Monitor ID (1-based index) (default: None - uses primary monitor)
     
     Returns:
     - Dictionary containing:
@@ -149,6 +153,7 @@ def mcp_mouse_click(params: Dict[str, Any]) -> Dict[str, Any]:
       - position: [x, y] coordinates where clicked
       - button: Button used for clicking
       - clicks: Number of clicks performed
+      - monitor: Monitor that was used
     """
     x = params.get("x")
     y = params.get("y")
@@ -161,14 +166,39 @@ def mcp_mouse_click(params: Dict[str, Any]) -> Dict[str, Any]:
     
     button = params.get("button", "left")
     clicks = params.get("clicks", 1)
+    monitor = params.get("monitor", None)
     
-    success = mouse_click(x=x, y=y, button=button, clicks=clicks)
+    try:
+        # Try to import the improved mouse control module
+        import sys
+        import os
+        
+        # Add the parent directory to the path to find the improved_mouse_control module
+        parent_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        if parent_dir not in sys.path:
+            sys.path.append(parent_dir)
+        
+        # Try to import the improved mouse control module
+        try:
+            from improved_mouse_control import improved_mouse_click
+            # Use the improved function
+            success = improved_mouse_click(x=x, y=y, button=button, clicks=clicks, monitor=monitor)
+            print(f"Used improved_mouse_click at ({x}, {y}) on monitor {monitor}")
+        except ImportError:
+            # Fall back to the original function
+            print("Could not import improved_mouse_click, using fallback")
+            success = mouse_click(x=x, y=y, button=button, clicks=clicks)
+    except Exception as e:
+        # If there's any error, fall back to the original function
+        print(f"Error trying to use improved_mouse_click: {e}")
+        success = mouse_click(x=x, y=y, button=button, clicks=clicks)
     
     return {
         "success": success,
         "position": [x, y],
         "button": button,
-        "clicks": clicks
+        "clicks": clicks,
+        "monitor": monitor
     }
 
 def mcp_type_text(params: Dict[str, Any]) -> Dict[str, Any]:
