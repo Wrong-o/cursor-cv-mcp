@@ -56,7 +56,7 @@ The server runs locally and provides a standardized REST API following the MCP s
 
 1. Clone the repository:
    ```bash
-   git clone https://github.com/yourusername/cursor-cv-mcp.git
+   git clone https://github.com/Wrong-o/cursor-cv-mcp.git
    cd cursor-cv-mcp
    ```
 
