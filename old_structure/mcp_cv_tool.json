@@ -1,0 +1,110 @@
+{
+  "name": "screenshot-tool",
+  "version": "0.1.0",
+  "description": "Screenshot Tool for Cursor IDE - Capture and analyze screenshots of your screen",
+  "author": "Otto Rongedal <otto@rongedal.se>",
+  "repository": "https://github.com/yourusername/cursor-cv-mcp",
+  "main": "mcp_cv_tool/server.py",
+  "type": "mcp",
+  "icon": "🖼️",
+  "interfaces": [
+    {
+      "type": "mcp",
+      "port": 8001,
+      "basePath": "/",
+      "functions": [
+        {
+          "name": "mcp_screenshot_capture",
+          "path": "/mcp_screenshot_capture",
+          "description": "Captures a screenshot of your screen from specified monitor",
+          "parameters": {
+            "monitor": {
+              "type": "integer",
+              "description": "Monitor number to capture (1-based index)",
+              "default": 1
+            },
+            "output_file": {
+              "type": "string",
+              "description": "Path to save the screenshot (optional)"
+            },
+            "debug": {
+              "type": "boolean",
+              "description": "Enable debug mode",
+              "default": false
+            },
+            "analyze": {
+              "type": "boolean",
+              "description": "Analyze screenshot with OCR",
+              "default": true
+            }
+          }
+        },
+        {
+          "name": "mcp_find_element",
+          "path": "/mcp_find_element",
+          "description": "Finds UI elements like buttons, inputs, or text areas",
+          "parameters": {
+            "screenshot_path": {
+              "type": "string",
+              "description": "Path to screenshot image"
+            },
+            "element_type": {
+              "type": "string",
+              "description": "Type of element to find (button, input, checkbox, etc.)"
+            },
+            "text": {
+              "type": "string",
+              "description": "Text content to search for"
+            },
+            "confidence": {
+              "type": "number",
+              "description": "Confidence threshold (0.0-1.0)",
+              "default": 0.7
+            }
+          }
+        },
+        {
+          "name": "mcp_mouse_click",
+          "path": "/mcp_mouse_click",
+          "description": "Clicks at a specific screen position",
+          "parameters": {
+            "x": {
+              "type": "integer",
+              "description": "X coordinate"
+            },
+            "y": {
+              "type": "integer", 
+              "description": "Y coordinate"
+            },
+            "button": {
+              "type": "string",
+              "description": "Mouse button (left, right, middle)",
+              "default": "left"
+            }
+          }
+        },
+        {
+          "name": "mcp_keyboard_input",
+          "path": "/mcp_keyboard_input",
+          "description": "Types text at the current cursor position",
+          "parameters": {
+            "text": {
+              "type": "string",
+              "description": "Text to type. Special keys: \\n (Enter), \\t (Tab), \\b (Backspace), \\e (Escape), \\s (Space), \\u (Up), \\d (Down), \\l (Left), \\r (Right)"
+            },
+            "interval": {
+              "type": "number",
+              "description": "Time between keypresses in seconds",
+              "default": 0.1
+            }
+          }
+        }
+      ]
+    }
+  ],
+  "activation": {
+    "command": "/usr/bin/python3",
+    "args": ["-m", "mcp_cv_tool.server"],
+    "working_directory": "/home/jayb/projects/ml_practise"
+  }
+} 

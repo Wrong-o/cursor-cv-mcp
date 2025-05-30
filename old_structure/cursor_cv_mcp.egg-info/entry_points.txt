@@ -1,0 +1,2 @@
+[console_scripts]
+cursor-cv-server = mcp_cv_tool.server:run_server

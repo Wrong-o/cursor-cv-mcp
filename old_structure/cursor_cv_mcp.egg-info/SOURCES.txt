@@ -1,0 +1,15 @@
+README.md
+pyproject.toml
+setup.py
+cursor_cv_mcp.egg-info/PKG-INFO
+cursor_cv_mcp.egg-info/SOURCES.txt
+cursor_cv_mcp.egg-info/dependency_links.txt
+cursor_cv_mcp.egg-info/entry_points.txt
+cursor_cv_mcp.egg-info/requires.txt
+cursor_cv_mcp.egg-info/top_level.txt
+mcp_cv_tool/__init__.py
+mcp_cv_tool/server.py
+mcp_cv_tool/startup.py
+mcp_cv_tool/core/__init__.py
+mcp_cv_tool/core/screen_capture.py
+tests/test_server.py
