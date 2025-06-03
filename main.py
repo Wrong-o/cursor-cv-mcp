@@ -4,6 +4,7 @@ from fastapi_mcp import FastApiMCP
 from cv_and_screenshots import get_available_monitors, get_screenshot, analyze_image, get_screenshot_with_analysis, find_text_in_image as cv_find_text_in_image
 from mouse_control import mouse_move as move_mouse_function, mouse_click as click_mouse_function
 from keyboard_control import keyboard_type_text, keyboard_press_keys
+from microphone import get_mcp_tool as get_microphone_tool
 from pydantic import BaseModel
 from typing import Optional, List, Dict, Any, Union
 
@@ -275,10 +276,125 @@ async def find_text_in_image(data: FindTextInImageInput):
     """Find text in an image"""
     return {"success": cv_find_text_in_image(data.image, data.target)}
 
+# Initialize MCP
+mcp = FastApiMCP(app, "MCP Servers")
 
-# Expose MCP server
-mcp = FastApiMCP(app, name="pinoMCP")
-mcp.mount()
+# Add MCP tools
+mcp.add_tools([
+    # Existing tools
+    {
+        "name": "say_hello",
+        "description": "Say hello to the user",
+        "parameters": {}
+    },
+    {
+        "name": "list_monitors",
+        "description": "List all available monitors",
+        "parameters": {
+            "random_string": {
+                "type": "string",
+                "description": "A random string to avoid caching"
+            }
+        }
+    },
+    {
+        "name": "screenshot_with_analysis",
+        "description": "Capture a screenshot of a specific monitor and analyze it",
+        "parameters": {
+            "monitor_id": {
+                "type": "integer",
+                "description": "The monitor ID to capture"
+            }
+        }
+    },
+    {
+        "name": "mouse_move",
+        "description": "Move the mouse to a specific position",
+        "parameters": {
+            "x": {
+                "type": "integer",
+                "description": "The x coordinate"
+            },
+            "y": {
+                "type": "integer",
+                "description": "The y coordinate"
+            },
+            "monitor": {
+                "type": "integer",
+                "description": "The monitor ID"
+            }
+        }
+    },
+    {
+        "name": "mouse_click",
+        "description": "Click the mouse at a specific position",
+        "parameters": {
+            "x": {
+                "type": "integer",
+                "description": "The x coordinate"
+            },
+            "y": {
+                "type": "integer",
+                "description": "The y coordinate"
+            },
+            "monitor": {
+                "type": "integer",
+                "description": "The monitor ID"
+            }
+        }
+    },
+    {
+        "name": "click_ui_element",
+        "description": "Click a UI element on the screen",
+        "parameters": {
+            "monitor_id": {
+                "type": "integer",
+                "description": "The monitor ID"
+            },
+            "element_type": {
+                "type": "string",
+                "description": "The type of element to click (text, button, checkbox)"
+            },
+            "search_text": {
+                "type": "string",
+                "description": "The text to search for"
+            }
+        }
+    },
+    {
+        "name": "type_text",
+        "description": "Type text using the keyboard",
+        "parameters": {
+            "text": {
+                "type": "string",
+                "description": "The text to type"
+            }
+        }
+    },
+    {
+        "name": "press_keys",
+        "description": "Press keyboard keys",
+        "parameters": {
+            "keys": {
+                "type": "array",
+                "description": "The keys to press",
+                "items": {
+                    "type": "string"
+                }
+            }
+        }
+    },
+    # Add new microphone tool
+    get_microphone_tool()["tool_definition"]
+])
+
+# Include microphone router
+microphone_tool = get_microphone_tool()
+app.include_router(
+    microphone_tool["router"],
+    prefix=microphone_tool["prefix"],
+    tags=microphone_tool["tags"]
+)
 
 if __name__ == "__main__":
     import uvicorn
