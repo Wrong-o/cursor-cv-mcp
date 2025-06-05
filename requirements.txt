@@ -1,0 +1,17 @@
+fastapi>=0.95.0
+uvicorn>=0.22.0
+pydantic>=1.10.7
+python-multipart>=0.0.6
+pyautogui>=0.9.53
+mss>=9.0.1
+opencv-python>=4.7.0
+pytesseract>=0.3.10
+psutil>=5.9.5
+Pillow>=9.5.0
+# Cross-platform window management
+PyGetWindow>=0.0.9
+# Platform-specific dependencies (uncomment as needed)
+# pywin32>=306; sys_platform == 'win32'
+# pyobjc-framework-Quartz>=9.2; sys_platform == 'darwin' 
+# TTS dependencies
+gtts>=2.5.0 

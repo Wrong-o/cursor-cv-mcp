@@ -6,9 +6,40 @@ import numpy as np
 import pytesseract
 from PIL import Image
 from typing import Any, Dict, Optional, Tuple
+import torch
+from transformers import BlipProcessor, BlipForConditionalGeneration
 
 # Configuration
 debug = False  # Debug mode flag
+# Check if CUDA is available
+device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+# BLIP model configuration
+blip_config = {
+    "model_name": "Salesforce/blip-image-captioning-base",
+    "max_new_tokens": 200,
+    "torch_dtype": torch.float16 if torch.cuda.is_available() else torch.float32  # Use half precision if CUDA is available
+}
+print(f"Using device: {device}")
+
+# Initialize BLIP model and processor globally to avoid reloading
+blip_processor = None
+blip_model = None
+
+def load_blip_model():
+    """
+    Load BLIP model and processor only once and cache them.
+    """
+    global blip_processor, blip_model
+    if blip_processor is None or blip_model is None:
+        print("Loading BLIP model...")
+        blip_processor = BlipProcessor.from_pretrained(blip_config["model_name"])
+        blip_model = BlipForConditionalGeneration.from_pretrained(
+            blip_config["model_name"],
+            torch_dtype=blip_config["torch_dtype"]
+        )
+        blip_model = blip_model.to(device)
+        print("BLIP model loaded successfully.")
+    return blip_processor, blip_model
 
 def get_available_monitors():
         try:
@@ -62,47 +93,25 @@ def analyze_image(image_data: bytes) -> Dict[str, Any]:
     Returns:
         Dict containing analysis results
     """
-    results = {
-        "basic_info": {},
-        "text_content": None,
-        "analysis": None
-    }
+    # Get cached or load BLIP model
+    processor, model = load_blip_model()
     
-    try:
-        img = Image.open(io.BytesIO(image_data))
-        
-        results["basic_info"] = {
-            "format": img.format,
-            "size": img.size,
-            "mode": img.mode,
-        }
-        
-        
-        # Try to extract text using OCR if available
-        print("Performing OCR to extract text...")
-        # Convert PIL Image to OpenCV format
-        if image_data:
-            nparr = np.frombuffer(image_data, np.uint8)
-            cv_img = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
-        else:
-            print("No image data provided")
-            return results
-        
-        # Convert to grayscale for better OCR
-        gray = cv2.cvtColor(cv_img, cv2.COLOR_BGR2GRAY)
-        
-        # Perform OCR
-        text = pytesseract.image_to_string(gray)
-        results["text_content"] = text
-        
-        # Print a sample of the extracted text
-        text_sample = text[:200] + "..." if len(text) > 200 else text
-        print(f"\nExtracted text sample:\n{text_sample}")
-    except Exception as e:
-        print(f"Error analyzing image: {e}")
-        results["analysis"] = f"Error: {str(e)}"
+    image = Image.open(io.BytesIO(image_data))
+    inputs = processor(image, return_tensors="pt")
     
-    return results 
+    # Move inputs to the same device as model
+    inputs = {k: v.to(device) for k, v in inputs.items()}
+    
+    with torch.no_grad():  # Disable gradient calculation for inference
+        out = model.generate(**inputs, max_new_tokens=blip_config["max_new_tokens"])
+    caption = processor.decode(out[0], skip_special_tokens=True)
+    print(f"Caption: {caption}")
+    
+    # Clear CUDA cache to prevent memory leaks if using GPU
+    if torch.cuda.is_available():
+        torch.cuda.empty_cache()
+    
+    return {"caption": caption}
 
 def get_screenshot_with_analysis(
     monitor_id: int = 0,

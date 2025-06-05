@@ -4,9 +4,13 @@ from fastapi_mcp import FastApiMCP
 from cv_and_screenshots import get_available_monitors, get_screenshot, analyze_image, get_screenshot_with_analysis, find_text_in_image as cv_find_text_in_image
 from mouse_control import mouse_move as move_mouse_function, mouse_click as click_mouse_function
 from keyboard_control import keyboard_type_text, keyboard_press_keys
-from microphone import get_mcp_tool as get_microphone_tool
+from window_control import get_open_windows, activate_window, launch_application
 from pydantic import BaseModel
 from typing import Optional, List, Dict, Any, Union
+from microphone import listen_to_microphone
+import os
+from fastapi.responses import FileResponse
+from tts_service import tts_service
 
 class PressKeysInput(BaseModel):
     """Input for the press_keys endpoint"""
@@ -276,125 +280,179 @@ async def find_text_in_image(data: FindTextInImageInput):
     """Find text in an image"""
     return {"success": cv_find_text_in_image(data.image, data.target)}
 
-# Initialize MCP
-mcp = FastApiMCP(app, "MCP Servers")
+@app.post("/speech_input", operation_id="speech_input")
+async def speech_input():
+    """Listen to the microphone and convert speech to text."""
+    try:
+        result = listen_to_microphone()
+        return {"success": True, "text": result}
+    except Exception as e:
+        print(f"Error in speech input: {str(e)}")
+        import traceback
+        traceback.print_exc()
+        return {"success": False, "error": str(e)}
 
-# Add MCP tools
-mcp.add_tools([
-    # Existing tools
-    {
-        "name": "say_hello",
-        "description": "Say hello to the user",
-        "parameters": {}
-    },
-    {
-        "name": "list_monitors",
-        "description": "List all available monitors",
-        "parameters": {
-            "random_string": {
-                "type": "string",
-                "description": "A random string to avoid caching"
-            }
-        }
-    },
-    {
-        "name": "screenshot_with_analysis",
-        "description": "Capture a screenshot of a specific monitor and analyze it",
-        "parameters": {
-            "monitor_id": {
-                "type": "integer",
-                "description": "The monitor ID to capture"
-            }
-        }
-    },
-    {
-        "name": "mouse_move",
-        "description": "Move the mouse to a specific position",
-        "parameters": {
-            "x": {
-                "type": "integer",
-                "description": "The x coordinate"
-            },
-            "y": {
-                "type": "integer",
-                "description": "The y coordinate"
-            },
-            "monitor": {
-                "type": "integer",
-                "description": "The monitor ID"
-            }
-        }
-    },
-    {
-        "name": "mouse_click",
-        "description": "Click the mouse at a specific position",
-        "parameters": {
-            "x": {
-                "type": "integer",
-                "description": "The x coordinate"
-            },
-            "y": {
-                "type": "integer",
-                "description": "The y coordinate"
-            },
-            "monitor": {
-                "type": "integer",
-                "description": "The monitor ID"
-            }
-        }
-    },
-    {
-        "name": "click_ui_element",
-        "description": "Click a UI element on the screen",
-        "parameters": {
-            "monitor_id": {
-                "type": "integer",
-                "description": "The monitor ID"
-            },
-            "element_type": {
-                "type": "string",
-                "description": "The type of element to click (text, button, checkbox)"
-            },
-            "search_text": {
-                "type": "string",
-                "description": "The text to search for"
-            }
-        }
-    },
-    {
-        "name": "type_text",
-        "description": "Type text using the keyboard",
-        "parameters": {
-            "text": {
-                "type": "string",
-                "description": "The text to type"
-            }
-        }
-    },
-    {
-        "name": "press_keys",
-        "description": "Press keyboard keys",
-        "parameters": {
-            "keys": {
-                "type": "array",
-                "description": "The keys to press",
-                "items": {
-                    "type": "string"
-                }
-            }
-        }
-    },
-    # Add new microphone tool
-    get_microphone_tool()["tool_definition"]
-])
+@app.get("/list_windows", operation_id="list_windows")
+async def list_windows():
+    """List all open windows across platforms.
+    
+    Returns information about all open windows including title, position, and size.
+    This function works on Windows, macOS, and Linux.
+    """
+    try:
+        windows = get_open_windows()
+        return {"success": True, "windows": windows}
+    except Exception as e:
+        print(f"Error listing windows: {str(e)}")
+        import traceback
+        traceback.print_exc()
+        return {"success": False, "error": str(e)}
 
-# Include microphone router
-microphone_tool = get_microphone_tool()
-app.include_router(
-    microphone_tool["router"],
-    prefix=microphone_tool["prefix"],
-    tags=microphone_tool["tags"]
-)
+@app.get("/activate_window", operation_id="activate_window")
+async def api_activate_window(window_id: Optional[str] = None, window_title: Optional[str] = None):
+    """Activate (bring to foreground) a specific window.
+    
+    Args:
+        window_id: ID of the window to activate (platform-specific)
+        window_title: Title of the window to activate (if window_id not provided)
+        
+    Returns:
+        Success status
+    """
+    if not window_id and not window_title:
+        return {"success": False, "error": "Either window_id or window_title must be provided"}
+    
+    try:
+        result = activate_window(window_id, window_title)
+        return {"success": result}
+    except Exception as e:
+        print(f"Error activating window: {str(e)}")
+        import traceback
+        traceback.print_exc()
+        return {"success": False, "error": str(e)}
+
+@app.get("/launch_application", operation_id="launch_application")
+async def api_launch_application(app_name: str, app_path: Optional[str] = None):
+    """Launch an application.
+    
+    Args:
+        app_name: Name of the application to launch
+        app_path: Full path to the application executable (optional)
+        
+    Returns:
+        Success status
+    """
+    try:
+        result = launch_application(app_name, app_path)
+        return {"success": result}
+    except Exception as e:
+        print(f"Error launching application: {str(e)}")
+        import traceback
+        traceback.print_exc()
+        return {"success": False, "error": str(e)}
+
+@app.get("/read_with_voice", operation_id="read_with_voice")
+async def read_with_voice(text: str, speaker_id: Optional[int] = 0):
+    """Generate speech from text and play it
+    
+    Args:
+        text: The text to convert to speech
+        speaker_id: Optional speaker ID for voice selection (default: 0, not used with gTTS)
+        
+    Returns:
+        Success status and audio file path
+    """
+    try:
+        # Generate speech
+        audio_path = tts_service.generate_speech(text, speaker_id)
+        
+        if not audio_path:
+            raise HTTPException(status_code=400, detail="Failed to generate speech: Empty text")
+            
+        # Return the audio file for streaming
+        return FileResponse(
+            path=audio_path,
+            media_type="audio/mpeg",
+            filename="speech.mp3",
+            headers={"Content-Disposition": "inline"}
+        )
+    except Exception as e:
+        import traceback
+        print(f"Error in read_with_voice: {str(e)}")
+        traceback.print_exc()
+        raise HTTPException(status_code=500, detail=f"Failed to generate speech: {str(e)}")
+
+@app.get("/mcp_read_with_voice", operation_id="mcp_read_with_voice")
+async def mcp_read_with_voice(text: str, speaker_id: Optional[int] = 0):
+    """Generate speech from text and play it (MCP-compatible version)
+    
+    This endpoint is specifically designed to be compatible with the MCP interface.
+    It generates the speech file and plays it directly on the server, then returns
+    a JSON response instead of the binary audio data.
+    
+    Args:
+        text: The text to convert to speech
+        speaker_id: Optional speaker ID for voice selection (default: 0, not used with gTTS)
+        
+    Returns:
+        JSON with success status and text that was spoken
+    """
+    try:
+        # Generate speech
+        audio_path = tts_service.generate_speech(text, speaker_id)
+        
+        if not audio_path:
+            return {"success": False, "error": "Failed to generate speech: Empty text"}
+            
+        # Play the audio on the server
+        try:
+            # Try different players in order of preference
+            players = [
+                ['cvlc', '--play-and-exit', '--no-video'],
+                ['vlc', '--play-and-exit', '--no-video'],
+                ['mpv', '--no-video'],
+                ['mplayer']
+            ]
+            
+            import subprocess
+            success = False
+            for player_cmd in players:
+                try:
+                    cmd = player_cmd + [audio_path]
+                    subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                    success = True
+                    break
+                except FileNotFoundError:
+                    continue
+            
+            if not success:
+                print("Warning: No compatible media player found to play the speech")
+            
+            # Return JSON response (MCP-compatible)
+            return {
+                "success": True, 
+                "text": text,
+                "message": "Text was successfully converted to speech and played"
+            }
+            
+        except Exception as play_error:
+            print(f"Error playing speech: {str(play_error)}")
+            # Even if playing failed, we return partial success
+            return {
+                "success": False,
+                "text": text,
+                "error": f"Generated speech but failed to play: {str(play_error)}"
+            }
+            
+    except Exception as e:
+        import traceback
+        print(f"Error in mcp_read_with_voice: {str(e)}")
+        traceback.print_exc()
+        return {"success": False, "error": f"Failed to generate speech: {str(e)}"}
+
+# Expose MCP server
+mcp = FastApiMCP(app, name="pinoMCP")
+mcp.mount()
 
 if __name__ == "__main__":
     import uvicorn

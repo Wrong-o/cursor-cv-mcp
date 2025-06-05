@@ -10,6 +10,7 @@ class MicrophoneResponse(BaseModel):
     text: Optional[str] = None
     error: Optional[str] = None
 
+
 @router.post("/listen")
 async def listen_to_microphone() -> Dict[str, Any]:
     """

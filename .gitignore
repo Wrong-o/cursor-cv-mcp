@@ -24,4 +24,5 @@ venv/
 ENV/
 .idea/
 .vscode/
-old_structure/cursor-cv-mcp/ 
+old_structure/cursor-cv-mcp/
+.pinovenv/
