@@ -1,13 +1,99 @@
-import mss
 import platform
 import io
-import cv2
-import numpy as np
-import pytesseract
+from typing import Dict, Any, List, Tuple, Optional
+import mss
 from PIL import Image
-from typing import Any, Dict, Optional, Tuple
-import torch
-from transformers import BlipProcessor, BlipForConditionalGeneration
+import numpy as np
+import subprocess
+import tempfile
+import traceback
+import os
+import time
+
+# Ensure required packages are available
+try:
+    import mss
+except ImportError:
+    print("mss package not found, attempting to install...")
+    try:
+        import subprocess
+        subprocess.check_call(["pip", "install", "mss"])
+        import mss
+        print("mss package installed successfully")
+    except Exception as e:
+        print(f"Failed to install mss package: {e}")
+        # Create a minimal mss substitute to prevent crashes
+        class DummyMSS:
+            class DummyShot:
+                def __init__(self):
+                    self.size = (1, 1)
+                    self.rgb = b'\x00\x00\x00'
+            
+            def __enter__(self):
+                return self
+                
+            def __exit__(self, *args):
+                pass
+                
+            def grab(self, *args, **kwargs):
+                print("WARNING: Using dummy screenshot - mss package not available")
+                return self.DummyShot()
+        
+        mss = type('', (), {'mss': DummyMSS})
+
+# Try importing PIL for image processing
+try:
+    from PIL import Image
+except ImportError:
+    print("PIL/Pillow not found, attempting to install...")
+    try:
+        import subprocess
+        subprocess.check_call(["pip", "install", "Pillow"])
+        from PIL import Image
+        print("Pillow package installed successfully")
+    except Exception as e:
+        print(f"Failed to install Pillow package: {e}")
+
+# Try importing OpenCV and numpy for image processing
+try:
+    import cv2
+    import numpy as np
+except ImportError:
+    print("OpenCV/numpy not found, attempting to install...")
+    try:
+        import subprocess
+        subprocess.check_call(["pip", "install", "opencv-python", "numpy"])
+        import cv2
+        import numpy as np
+        print("OpenCV and numpy packages installed successfully")
+    except Exception as e:
+        print(f"Failed to install OpenCV/numpy packages: {e}")
+        # Create minimal numpy functionality
+        np = type('', (), {'array': lambda x: x})
+
+# Try importing PyTesseract for OCR
+try:
+    import pytesseract
+except ImportError:
+    print("PyTesseract not found, attempting to install...")
+    try:
+        import subprocess
+        subprocess.check_call(["pip", "install", "pytesseract"])
+        import pytesseract
+        print("PyTesseract package installed successfully")
+    except Exception as e:
+        print(f"Failed to install PyTesseract package: {e}")
+
+# Try importing torch and transformers for BLIP model
+try:
+    import torch
+    from transformers import BlipProcessor, BlipForConditionalGeneration
+except ImportError:
+    print("torch/transformers not found - some AI vision features will be limited")
+
+# Configuration
+BLIP_MODEL_LOADED = False
+BLIP_MODEL = None
 
 # Configuration
 debug = False  # Debug mode flag
@@ -113,9 +199,149 @@ def analyze_image(image_data: bytes) -> Dict[str, Any]:
     
     return {"caption": caption}
 
+def cv_detect_and_analyze_regions(image_data: bytes) -> List[Dict[str, Any]]:
+    """
+    Detect image-like regions in a screenshot and analyze them with BLIP.
+    
+    Args:
+        image_data: Raw image data in bytes
+        
+    Returns:
+        List of dictionaries containing region information and analysis
+    """
+    try:
+        print("Detecting and analyzing image-like regions...")
+        
+        if not image_data:
+            print("Error: No image data provided")
+            return []
+            
+        # Convert bytes to OpenCV image
+        nparr = np.frombuffer(image_data, np.uint8)
+        img = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
+        
+        if img is None:
+            print("Error: Failed to decode image data")
+            return []
+
+        # Create a copy of the original image
+        original_img = img.copy()
+        height, width = img.shape[:2]
+        
+        # Convert to grayscale
+        gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+        
+        # Apply GaussianBlur to reduce noise
+        blurred = cv2.GaussianBlur(gray, (5, 5), 0)
+        
+        # Apply adaptive thresholding to find edges
+        binary = cv2.adaptiveThreshold(
+            blurred, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C, 
+            cv2.THRESH_BINARY_INV, 11, 2
+        )
+        
+        # Find contours in the binary image
+        contours, _ = cv2.findContours(binary, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+        
+        # Minimum region size - ignore very small regions
+        min_region_size = max(64, min(height, width) * 0.05)
+        # Maximum region size - ignore very large regions (like the entire screen)
+        max_region_size = min(height, width) * 0.5
+        
+        # Maximum number of regions to analyze to avoid performance issues
+        max_regions = 10
+        
+        # Store potential UI regions
+        regions = []
+        
+        # Get cached or load BLIP model
+        processor, model = load_blip_model()
+        
+        # Process each contour
+        for contour in contours:
+            # Get bounding rectangle
+            x, y, w, h = cv2.boundingRect(contour)
+            
+            # Skip if too small or too large
+            if w < min_region_size or h < min_region_size or w > max_region_size or h > max_region_size:
+                continue
+            
+            # Calculate edge density within the region
+            roi = binary[y:y+h, x:x+w]
+            edge_pixels = np.count_nonzero(roi)
+            total_pixels = roi.size
+            edge_density = edge_pixels / total_pixels
+            
+            # Skip regions with very low or very high edge density
+            # Low density = mostly blank, high density = likely noise or text
+            if edge_density < 0.05 or edge_density > 0.5:
+                continue
+            
+            # Extract the region from the original image
+            region_img = original_img[y:y+h, x:x+w]
+            
+            # Convert region to PIL Image for BLIP analysis
+            region_pil = Image.fromarray(cv2.cvtColor(region_img, cv2.COLOR_BGR2RGB))
+            
+            # Create a buffer for the region image
+            region_buffer = io.BytesIO()
+            region_pil.save(region_buffer, format='JPEG')
+            region_bytes = region_buffer.getvalue()
+            
+            # Analyze the region with BLIP
+            try:
+                inputs = processor(region_pil, return_tensors="pt")
+                
+                # Move inputs to the same device as model
+                inputs = {k: v.to(device) for k, v in inputs.items()}
+                
+                with torch.no_grad():  # Disable gradient calculation for inference
+                    out = model.generate(**inputs, max_new_tokens=blip_config["max_new_tokens"])
+                
+                caption = processor.decode(out[0], skip_special_tokens=True)
+                
+                # Store the region information
+                region_info = {
+                    "position": {
+                        "x": x,
+                        "y": y,
+                        "width": w,
+                        "height": h,
+                        "center_x": x + w // 2,
+                        "center_y": y + h // 2
+                    },
+                    "caption": caption,
+                    "edge_density": edge_density,
+                    "image_data": region_bytes
+                }
+                
+                regions.append(region_info)
+                print(f"Analyzed region at ({x}, {y}, {w}, {h}): {caption}")
+                
+                # Limit the number of regions to analyze
+                if len(regions) >= max_regions:
+                    break
+            
+            except Exception as e:
+                print(f"Error analyzing region: {e}")
+                continue
+        
+        # Clear CUDA cache to prevent memory leaks if using GPU
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+        
+        print(f"Found and analyzed {len(regions)} image-like regions")
+        return regions
+    
+    except Exception as e:
+        import traceback
+        print(f"Error in region detection and analysis: {str(e)}")
+        traceback.print_exc()
+        return []
+
 def get_screenshot_with_analysis(
     monitor_id: int = 0,
-) -> Tuple[Optional[bytes], Optional[Dict[str, Any]], Optional[Any], Optional[Any]]:
+) -> Tuple[Optional[bytes], Optional[Dict[str, Any]], Optional[Any], Optional[Any], Optional[List[Dict[str, Any]]]]:
     try:
         # Get monitor information
         with mss.mss() as sct:
@@ -146,10 +372,13 @@ def get_screenshot_with_analysis(
             ui_buttons = cv_find_all_buttons(image_data)
             ui_checkboxes = cv_find_checkboxes(image_data)
             
-            return image_data, analysis_results, ui_buttons, ui_checkboxes
+            # Detect and analyze image-like regions
+            ui_regions = cv_detect_and_analyze_regions(image_data)
+            
+            return image_data, analysis_results, ui_buttons, ui_checkboxes, ui_regions
     except Exception as e:
         print(f"Error capturing screenshot: {e}")
-        return None, None, None, None
+        return None, None, None, None, None
 
 def cv_find_all_buttons(image_data: bytes):
     nparr = np.frombuffer(image_data, np.uint8)
@@ -210,86 +439,133 @@ def cv_find_checkboxes(image_data: bytes):
         # Apply GaussianBlur to reduce noise
         blurred = cv2.GaussianBlur(gray, (5, 5), 0)
         
-        # Apply Canny edge detection
-        edges = cv2.Canny(blurred, 50, 150)
+        # Apply Canny edge detection with tighter thresholds
+        edges = cv2.Canny(blurred, 75, 200)
         
         # Find contours in the edge map
         contours, _ = cv2.findContours(edges, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
         
         # Filter contours to find potential checkboxes
         checkboxes = []
+        
+        # More strict minimum size - at least 16x16 pixels or 2% of the screen dimension
+        min_size = max(16, min(height, width) * 0.02)  
+        # More reasonable maximum size - not more than 5% of the screen dimension
+        max_size = min(height, width) * 0.05
+        
+        # Maximum number of checkboxes to return
+        max_checkboxes = 20
+        
         for contour in contours:
             # Calculate bounding box
             x, y, w, h = cv2.boundingRect(contour)
             
-            # Filter based on aspect ratio and size
+            # Skip if too small or too large
+            if w < min_size or h < min_size or w > max_size or h > max_size:
+                continue
+                
+            # Filter based on aspect ratio - stricter range for squareness
             aspect_ratio = float(w) / h
-            min_size = min(height, width) * 0.01  # Min 1% of image dimension
-            max_size = min(height, width) * 0.1   # Max 10% of image dimension
+            if not (0.8 <= aspect_ratio <= 1.2):
+                continue
+                
+            # Calculate approximated contour
+            epsilon = 0.05 * cv2.arcLength(contour, True)
+            approx = cv2.approxPolyDP(contour, epsilon, True)
             
-            # Checkboxes are roughly square (aspect ratio close to 1)
-            if (0.7 <= aspect_ratio <= 1.3 and 
-                min_size <= w <= max_size and 
-                min_size <= h <= max_size):
+            # Checkboxes must have 4 corners (roughly rectangular)
+            if len(approx) != 4:
+                continue
                 
-                # Further analyze the candidate checkbox
-                checkbox_roi = gray[y:y+h, x:x+w]
+            # Check for convexity (checkboxes are convex shapes)
+            if not cv2.isContourConvex(approx):
+                continue
                 
-                # Check if it's a checkbox by analyzing the contour
-                # Calculate approximated contour
-                epsilon = 0.04 * cv2.arcLength(contour, True)
-                approx = cv2.approxPolyDP(contour, epsilon, True)
+            # Further analyze the candidate checkbox
+            checkbox_roi = gray[y:y+h, x:x+w]
+            
+            # Check for border characteristics
+            # Create edge map of just the checkbox region
+            checkbox_edges = cv2.Canny(checkbox_roi, 75, 200)
+            edge_pixels = np.count_nonzero(checkbox_edges)
+            
+            # Calculate perimeter-to-area ratio
+            perimeter = cv2.arcLength(contour, True)
+            area = cv2.contourArea(contour)
+            if area == 0:
+                continue
                 
-                # Checkboxes often have 4 corners (rectangle/square)
-                if 4 <= len(approx) <= 8:
-                    # Calculate average intensity inside and outside the contour
-                    mask = np.zeros_like(checkbox_roi)
-                    cv2.drawContours(mask, [contour - np.array([[x, y]])], 0, 255, -1)
-                    inner_mean = cv2.mean(checkbox_roi, mask=mask)[0]
-                    outer_mean = cv2.mean(checkbox_roi, mask=cv2.bitwise_not(mask))[0]
-                    
-                    # Determine if it's checked based on inner content
-                    # Create a mask for the inner area (smaller than the checkbox)
-                    inner_mask = np.zeros_like(checkbox_roi)
-                    shrink_factor = 0.25
-                    inner_x = int(w * shrink_factor)
-                    inner_y = int(h * shrink_factor)
-                    inner_w = int(w * (1 - 2 * shrink_factor))
-                    inner_h = int(h * (1 - 2 * shrink_factor))
-                    
-                    if inner_w > 0 and inner_h > 0:
-                        inner_roi = checkbox_roi[inner_y:inner_y+inner_h, inner_x:inner_x+inner_w]
-                        
-                        if inner_roi.size > 0:
-                            # Calculate statistics for the inner region
-                            inner_mean = np.mean(inner_roi)
-                            inner_std = np.std(inner_roi)
-                            
-                            # Threshold the inner region to detect marks
-                            _, inner_thresh = cv2.threshold(inner_roi, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
-                            white_pixel_ratio = np.sum(inner_thresh == 255) / inner_roi.size
-                            
-                            # Determine checkbox state
-                            checkbox_type = "unchecked"
-                            
-                            # If inner area has significant dark pixels, it might be checked
-                            if white_pixel_ratio < 0.7:
-                                # Check for checkmark pattern (diagonal lines)
-                                # Apply Hough line transform to detect lines
-                                edges_inner = cv2.Canny(inner_roi, 50, 150)
-                                lines = cv2.HoughLinesP(edges_inner, 1, np.pi/180, 
-                                                       threshold=10, 
-                                                       minLineLength=min(inner_w, inner_h)*0.3, 
-                                                       maxLineGap=5)
-                                
-                                if lines is not None and len(lines) > 0:
-                                    checkbox_type = "checked"
-                                else:
-                                    # If no lines but still dark, might be indeterminate
-                                    checkbox_type = "indeterminate"
-                            
-                            checkboxes.append((checkbox_type, (x, y, w, h)))
-                            print(f"Found {checkbox_type} checkbox at ({x}, {y}, {w}, {h})")
+            perimeter_area_ratio = perimeter / area
+            
+            # Real checkboxes have a specific edge density
+            # Too few edges might be a solid shape, too many might be a complex icon
+            edge_density = edge_pixels / (w * h)
+            if not (0.1 <= edge_density <= 0.5):
+                continue
+                
+            # Threshold the inner region
+            _, checkbox_thresh = cv2.threshold(checkbox_roi, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+            
+            # Create a mask for the inner area (smaller than the checkbox)
+            shrink_factor = 0.25
+            inner_x = int(w * shrink_factor)
+            inner_y = int(h * shrink_factor)
+            inner_w = int(w * (1 - 2 * shrink_factor))
+            inner_h = int(h * (1 - 2 * shrink_factor))
+            
+            if inner_w <= 0 or inner_h <= 0:
+                continue
+                
+            inner_roi = checkbox_roi[inner_y:inner_y+inner_h, inner_x:inner_x+inner_w]
+            
+            if inner_roi.size <= 0:
+                continue
+                
+            # Calculate statistics for the inner region
+            inner_mean = np.mean(inner_roi)
+            inner_std = np.std(inner_roi)
+            
+            # Threshold the inner region to detect marks
+            _, inner_thresh = cv2.threshold(inner_roi, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+            white_pixel_ratio = np.sum(inner_thresh == 255) / inner_roi.size
+            
+            # Determine checkbox state
+            checkbox_type = "unchecked"
+            
+            # If inner area has significant dark pixels, it might be checked
+            if white_pixel_ratio < 0.7:
+                # Check for checkmark pattern (diagonal lines)
+                # Apply Hough line transform to detect lines
+                edges_inner = cv2.Canny(inner_roi, 50, 150)
+                lines = cv2.HoughLinesP(edges_inner, 1, np.pi/180, 
+                                       threshold=10, 
+                                       minLineLength=min(inner_w, inner_h)*0.3, 
+                                       maxLineGap=5)
+                
+                if lines is not None and len(lines) > 0:
+                    checkbox_type = "checked"
+                else:
+                    # If no lines but still dark, might be indeterminate
+                    checkbox_type = "indeterminate"
+            
+            # Format the position with center points for easier clicking
+            center_x = x + w // 2
+            center_y = y + h // 2
+            position = {
+                "x": x,
+                "y": y,
+                "width": w,
+                "height": h,
+                "center_x": center_x,
+                "center_y": center_y
+            }
+            
+            checkboxes.append({"type": checkbox_type, "position": position})
+            print(f"Found {checkbox_type} checkbox at ({x}, {y}, {w}, {h})")
+            
+            # Limit the number of checkboxes returned
+            if len(checkboxes) >= max_checkboxes:
+                break
         
         print(f"Found {len(checkboxes)} checkboxes in total")
         return checkboxes
@@ -427,4 +703,408 @@ def find_text_in_image(image_data: bytes, target: str):
         print(f"Error in find_text_in_image: {str(e)}")
         traceback.print_exc()
         return []
+
+def analyze_window(window_title: str = None, window_id: str = None) -> Dict[str, Any]:
+    """
+    Capture and analyze a specific window's content across platforms.
+    
+    Args:
+        window_title: Title of the window to analyze
+        window_id: ID of the window to analyze (platform-specific, optional)
+    
+    Returns:
+        Dict containing analysis results with:
+        - caption: Description of the window content
+        - ui_buttons: Detected buttons in the window
+        - ui_checkboxes: Detected checkboxes in the window
+        - ui_regions: Detected image regions with captions
+        - window_info: Metadata about the window
+    """
+    system = platform.system()
+    window_image = None
+    window_info = None
+    
+    # Find window info based on title or ID
+    windows = []
+    try:
+        # Import locally to avoid module-level import issues
+        from window_control import get_open_windows
+        windows = get_open_windows()
+    except Exception as e:
+        print(f"Error getting window list: {e}")
+        print(f"Window control module not available or failed, falling back to basic window detection")
+        import traceback
+        traceback.print_exc()
+    
+    # Find the target window
+    target_window = None
+    if windows:
+        for window in windows:
+            if window_id and "id" in window and str(window["id"]) == str(window_id):
+                target_window = window
+                break
+            elif window_title and "title" in window and window_title.lower() in window["title"].lower():
+                target_window = window
+                break
+    
+    if target_window is None:
+        print(f"Warning: No window found with ID {window_id} or title {window_title}")
+        # Create a minimal target window with the provided information
+        target_window = {"id": window_id, "title": window_title}
+    
+    # Capture the window content
+    try:
+        if system == "Windows":
+            window_image = _capture_window_windows(target_window, window_title, window_id)
+        elif system == "Darwin":  # macOS
+            window_image = _capture_window_macos(target_window, window_title, window_id)
+        elif system == "Linux":
+            window_image = _capture_window_linux(target_window, window_title, window_id)
+        else:
+            print(f"Unsupported platform: {system}")
+            return {"error": f"Unsupported platform: {system}"}
+    except Exception as e:
+        import traceback
+        print(f"Error capturing window: {e}")
+        traceback.print_exc()
+        return {"error": f"Error capturing window: {str(e)}"}
+    
+    # If window capture failed
+    if window_image is None:
+        # Fall back to full screen capture
+        try:
+            print(f"Failed to capture window: {window_title or window_id}, falling back to full screen capture")
+            window_image = get_screenshot(1)
+        except Exception as e:
+            import traceback
+            print(f"Error during fallback screenshot: {e}")
+            traceback.print_exc()
+            return {"error": f"Failed to capture window: {window_title or window_id}"}
+    
+    # Analyze the window content
+    try:
+        # Analyze image content
+        analysis_results = analyze_image(window_image)
+        
+        # Detect UI elements
+        ui_buttons = cv_find_all_buttons(window_image)
+        ui_checkboxes = cv_find_checkboxes(window_image)
+        
+        # Detect and analyze image regions
+        ui_regions = cv_detect_and_analyze_regions(window_image)
+        
+        # Combine results
+        result = {
+            "caption": analysis_results.get("caption", ""),
+            "ui_buttons": ui_buttons,
+            "ui_checkboxes": ui_checkboxes,
+            "ui_regions": ui_regions,
+            "window_info": target_window
+        }
+        
+        return result
+    except Exception as e:
+        import traceback
+        print(f"Error analyzing window content: {e}")
+        traceback.print_exc()
+        return {"error": f"Error analyzing window content: {str(e)}"}
+
+def _capture_window_windows(window_info=None, window_title=None, window_id=None) -> Optional[bytes]:
+    """Capture a window on Windows"""
+    try:
+        # If window_info contains position and size, use that for screenshot
+        if window_info and "position" in window_info and "size" in window_info:
+            pos = window_info["position"]
+            size = window_info["size"]
+            
+            with mss.mss() as sct:
+                monitor = {
+                    "left": pos["x"],
+                    "top": pos["y"],
+                    "width": size["width"],
+                    "height": size["height"]
+                }
+                screenshot = sct.grab(monitor)
+                img = Image.frombytes("RGB", screenshot.size, screenshot.rgb)
+                
+                buf = io.BytesIO()
+                img.save(buf, format='JPEG')
+                return buf.getvalue()
+        
+        # Try alternative method if window_info doesn't have position/size
+        # or if window capture failed
+        try:
+            import win32gui
+            import win32ui
+            from ctypes import windll
+            from PIL import Image
+            
+            if window_id:
+                hwnd = int(window_id)
+            elif window_title:
+                hwnd = win32gui.FindWindow(None, window_title)
+            else:
+                return None
+                
+            if not hwnd:
+                return None
+                
+            # Get window dimensions
+            left, top, right, bottom = win32gui.GetWindowRect(hwnd)
+            width = right - left
+            height = bottom - top
+            
+            # Create device context
+            hwndDC = win32gui.GetWindowDC(hwnd)
+            mfcDC = win32ui.CreateDCFromHandle(hwndDC)
+            saveDC = mfcDC.CreateCompatibleDC()
+            
+            # Create bitmap
+            saveBitMap = win32ui.CreateBitmap()
+            saveBitMap.CreateCompatibleBitmap(mfcDC, width, height)
+            saveDC.SelectObject(saveBitMap)
+            
+            # Copy screen to bitmap
+            result = windll.user32.PrintWindow(hwnd, saveDC.GetSafeHdc(), 3)
+            
+            # Convert to PIL Image
+            bmpinfo = saveBitMap.GetInfo()
+            bmpstr = saveBitMap.GetBitmapBits(True)
+            img = Image.frombuffer(
+                'RGB',
+                (bmpinfo['bmWidth'], bmpinfo['bmHeight']),
+                bmpstr, 'raw', 'BGRX', 0, 1)
+            
+            # Clean up
+            win32gui.DeleteObject(saveBitMap.GetHandle())
+            saveDC.DeleteDC()
+            mfcDC.DeleteDC()
+            win32gui.ReleaseDC(hwnd, hwndDC)
+            
+            buf = io.BytesIO()
+            img.save(buf, format='JPEG')
+            return buf.getvalue()
+        except ImportError:
+            print("win32gui/win32ui not available, falling back to full screen capture")
+            return get_screenshot(1)  # Capture primary monitor as fallback
+    except Exception as e:
+        print(f"Error capturing window on Windows: {e}")
+        return None
+
+def _capture_window_macos(window_info=None, window_title=None, window_id=None) -> Optional[bytes]:
+    """Capture a window on macOS"""
+    try:
+        # If window_info contains position and size, use that for screenshot
+        if window_info and "position" in window_info and "size" in window_info:
+            pos = window_info["position"]
+            size = window_info["size"]
+            
+            # If position is available and valid
+            if pos["x"] > 0 or pos["y"] > 0:
+                with mss.mss() as sct:
+                    monitor = {
+                        "left": pos["x"],
+                        "top": pos["y"],
+                        "width": size["width"],
+                        "height": size["height"]
+                    }
+                    screenshot = sct.grab(monitor)
+                    img = Image.frombytes("RGB", screenshot.size, screenshot.rgb)
+                    
+                    buf = io.BytesIO()
+                    img.save(buf, format='JPEG')
+                    return buf.getvalue()
+        
+        # Use screencapture command-line tool as fallback
+        if window_title:
+            # Create a temporary file to save the screenshot
+            with tempfile.NamedTemporaryFile(suffix='.jpg', delete=False) as temp_file:
+                temp_path = temp_file.name
+            
+            # Use AppleScript to capture the specific window
+            script = f"""
+            tell application "System Events"
+                set frontApp to first application process whose frontmost is true
+                set frontAppName to name of frontApp
+                
+                set targetApp to null
+                set targetWindow to null
+                
+                set appList to every application process whose visible is true
+                repeat with oneApp in appList
+                    set appName to name of oneApp
+                    
+                    repeat with oneWindow in windows of oneApp
+                        if name of oneWindow contains "{window_title}" then
+                            set targetApp to oneApp
+                            set targetWindow to oneWindow
+                            exit repeat
+                        end if
+                    end repeat
+                    
+                    if targetApp is not null then
+                        exit repeat
+                    end if
+                end repeat
+                
+                if targetApp is not null then
+                    set frontmost of targetApp to true
+                    delay 0.5
+                    do shell script "screencapture -l$(osascript -e 'tell application \\"System Events\\" to id of window 1 of process \\"" & name of targetApp & "\\"') -o {temp_path}"
+                    return true
+                else
+                    return false
+                end if
+            end tell
+            """
+            
+            result = subprocess.run(['osascript', '-e', script], 
+                                  capture_output=True, text=True)
+            
+            if result.returncode == 0 and "true" in result.stdout.lower() and os.path.exists(temp_path):
+                # Read the captured screenshot
+                with open(temp_path, 'rb') as img_file:
+                    img_data = img_file.read()
+                
+                # Clean up temp file
+                os.unlink(temp_path)
+                return img_data
+            else:
+                # Clean up temp file if it exists
+                if os.path.exists(temp_path):
+                    os.unlink(temp_path)
+                
+                # Fall back to full screen capture
+                return get_screenshot(1)
+        else:
+            # If no window title provided, capture the active window
+            with tempfile.NamedTemporaryFile(suffix='.jpg', delete=False) as temp_file:
+                temp_path = temp_file.name
+            
+            # Capture the active window
+            result = subprocess.run(['screencapture', '-JW', temp_path], 
+                                  capture_output=True, text=True)
+            
+            if result.returncode == 0 and os.path.exists(temp_path):
+                # Read the captured screenshot
+                with open(temp_path, 'rb') as img_file:
+                    img_data = img_file.read()
+                
+                # Clean up temp file
+                os.unlink(temp_path)
+                return img_data
+            else:
+                # Clean up temp file if it exists
+                if os.path.exists(temp_path):
+                    os.unlink(temp_path)
+                
+                # Fall back to full screen capture
+                return get_screenshot(1)
+    except Exception as e:
+        print(f"Error capturing window on macOS: {e}")
+        return None
+
+def _capture_window_linux(window_info=None, window_title=None, window_id=None) -> Optional[bytes]:
+    """Capture a window on Linux"""
+    try:
+        # If window_info contains position and size, use that for screenshot
+        if window_info and "position" in window_info and "size" in window_info and isinstance(window_info["position"], dict) and isinstance(window_info["size"], dict):
+            pos = window_info["position"]
+            size = window_info["size"]
+            
+            # If position is available and valid
+            if pos.get("x", 0) > 0 or pos.get("y", 0) > 0:
+                try:
+                    with mss.mss() as sct:
+                        monitor = {
+                            "left": pos.get("x", 0),
+                            "top": pos.get("y", 0),
+                            "width": size.get("width", 800),
+                            "height": size.get("height", 600)
+                        }
+                        screenshot = sct.grab(monitor)
+                        img = Image.frombytes("RGB", screenshot.size, screenshot.rgb)
+                        
+                        buf = io.BytesIO()
+                        img.save(buf, format='JPEG')
+                        return buf.getvalue()
+                except Exception as e:
+                    print(f"Error using mss for window capture: {e}")
+                    # Continue to alternative methods
+        
+        # Try using xwd or import to capture the window
+        try:
+            with tempfile.NamedTemporaryFile(suffix='.png', delete=False) as temp_file:
+                temp_path = temp_file.name
+            
+            capture_cmd = None
+            
+            if window_id:
+                # Try xwd with window ID
+                capture_cmd = ['xwd', '-id', str(window_id), '-out', temp_path]
+            elif window_title:
+                # Try to get window ID first using xdotool
+                try:
+                    win_id_result = subprocess.run(
+                        ['xdotool', 'search', '--name', window_title], 
+                        capture_output=True, text=True
+                    )
+                    
+                    if win_id_result.returncode == 0 and win_id_result.stdout.strip():
+                        window_id = win_id_result.stdout.strip().split('\n')[0]
+                        # Now use import to capture the window
+                        capture_cmd = ['import', '-window', window_id, temp_path]
+                    else:
+                        # Activate the window first, then capture
+                        subprocess.run(['xdotool', 'search', '--name', window_title, 'windowactivate'], 
+                                      capture_output=True, text=True)
+                        time.sleep(0.5)  # Allow time for window to activate
+                        capture_cmd = ['import', '-window', 'root', temp_path]
+                except FileNotFoundError:
+                    print("xdotool not found, trying alternative methods")
+                    # Try using scrot instead
+                    capture_cmd = ['scrot', temp_path]
+            else:
+                # Capture active window or full screen
+                capture_cmd = ['scrot', '-u', temp_path]
+            
+            if capture_cmd:
+                try:
+                    result = subprocess.run(capture_cmd, capture_output=True, text=True, timeout=5)
+                    
+                    if result.returncode == 0 and os.path.exists(temp_path) and os.path.getsize(temp_path) > 0:
+                        # Read the captured screenshot
+                        with open(temp_path, 'rb') as img_file:
+                            img_data = img_file.read()
+                        
+                        # Clean up temp file
+                        try:
+                            os.unlink(temp_path)
+                        except:
+                            pass
+                            
+                        return img_data
+                except subprocess.TimeoutExpired:
+                    print("Screenshot command timed out")
+                except Exception as e:
+                    print(f"Error running screenshot command: {e}")
+            
+            # Clean up temp file if it exists
+            if os.path.exists(temp_path):
+                try:
+                    os.unlink(temp_path)
+                except:
+                    pass
+        except Exception as e:
+            print(f"Error with command-line screenshot tools: {e}")
+        
+        # Fall back to full screen capture if all else fails
+        print("Falling back to full screen capture")
+        return get_screenshot(1)
+    except Exception as e:
+        import traceback
+        print(f"Error capturing window on Linux: {e}")
+        traceback.print_exc()
+        # Return None and let the caller handle the fallback
+        return None
  
