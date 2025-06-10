@@ -5,12 +5,14 @@ from cv_and_screenshots import get_available_monitors, get_screenshot, analyze_i
 from mouse_control import mouse_move as move_mouse_function, mouse_click as click_mouse_function
 from keyboard_control import keyboard_type_text, keyboard_press_keys
 from window_control import get_open_windows, activate_window, launch_application
+from file_operations import open_downloads_folder, get_folder_contents
 from pydantic import BaseModel
 from typing import Optional, List, Dict, Any, Union
 from microphone import listen_to_microphone
 import os
 from fastapi.responses import FileResponse
 from tts_service import tts_service
+from os_info import get_os_info
 
 class PressKeysInput(BaseModel):
     """Input for the press_keys endpoint"""
@@ -31,11 +33,12 @@ async def hello():
     """A simple greeting endpoint"""
     return {"message": "Hello World"}
 
-@app.get("/list_monitors", operation_id="list_monitors")
-async def list_monitors():
-    """List all available monitors and their dimensions"""
+@app.get("/monitors_and_os", operation_id="monitors_and_os")
+async def monitors_and_os():
+    """List all available monitors and their dimensions
+    and the operating system of the PC"""
     monitors = get_available_monitors()
-    return {"monitors": monitors}
+    return {"monitors": monitors, "os": get_os_info()}
 
 @app.get("/screenshot_with_analysis", operation_id="screenshot_with_analysis")
 async def screenshot_with_analysis(monitor_id: int, target_string: Optional[str] = None):
@@ -449,6 +452,36 @@ async def mcp_read_with_voice(text: str, speaker_id: Optional[int] = 0):
         print(f"Error in mcp_read_with_voice: {str(e)}")
         traceback.print_exc()
         return {"success": False, "error": f"Failed to generate speech: {str(e)}"}
+
+@app.get("/open_downloads_folder", operation_id="open_downloads_folder")
+async def api_open_downloads_folder():
+    """Open the user's Downloads folder based on the operating system.
+    
+    Works on Windows, macOS, and Linux.
+    
+    Returns:
+        Success status
+    """
+    try:
+        result = open_downloads_folder()
+        return {"success": result}
+    except Exception as e:
+        print(f"Error opening Downloads folder: {str(e)}")
+        import traceback
+        traceback.print_exc()
+        return {"success": False, "error": str(e)}
+
+@app.get("/folder_contents", operation_id="folder_contents")
+async def api_folder_contents(folder_path: str):
+    """Get the contents of a folder"""
+    try:
+        result = get_folder_contents(folder_path)
+        return result
+    except Exception as e:
+        print(f"Error getting folder contents: {str(e)}")
+        import traceback
+        traceback.print_exc()
+        return {"success": False, "error": str(e)}
 
 # Expose MCP server
 mcp = FastApiMCP(app, name="pinoMCP")
