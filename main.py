@@ -227,19 +227,31 @@ async def click_ui_element(
             element_info = {"text": matched_word, "bounds": bounds}
             
         elif element_type == "button":
-            # Find button elements
             if not ui_buttons or len(ui_buttons) <= index:
                 return {
                     "success": False,
-                    "error": f"No buttons found or index {index} out of bounds",
+                    "error": f"No button found at index {index}",
                     "buttons_found": len(ui_buttons) if ui_buttons else 0
                 }
                 
-            # Get the specified button
-            button_text, bounds = ui_buttons[index]
-            x, y, w, h = bounds
-            element_position = {"x": x + w//2, "y": y + h//2}
-            element_info = {"text": button_text, "bounds": bounds}
+            # Handle the new button format which is a dict with 'text' and 'position'
+            button = ui_buttons[index]
+            button_text = button["text"] if "text" in button else "Unknown"
+            position = button["position"]
+            x, y = position["center_x"], position["center_y"]
+            
+            # Move and click at the button position
+            result = click_mouse_function(x, y, button=button_text, clicks=clicks, monitor=monitor_id)
+            
+            return {
+                "success": result,
+                "clicked_element": {
+                    "type": "button",
+                    "text": button_text,
+                    "position": position,
+                    "index": index
+                }
+            }
             
         elif element_type == "checkbox":
             # Find checkbox elements
@@ -638,7 +650,7 @@ async def analyze_window(window_id: str, window_title: Optional[str] = None):
             "window_id": window_id,
             "window_title": window_title,
             "caption": result.get("caption", ""),
-            "buttons": result.get("ui_buttons", []),
+            "buttons": result.get("buttons", []),
             "checkboxes": formatted_checkboxes,
             "ui_regions": processed_regions,
             "window_info": result.get("window_info", {})

@@ -296,36 +296,61 @@ def launch_application(app_name: str, app_path: str = None) -> bool:
         app_path: Full path to the application (if needed)
         
     Returns:
-        Success status
+        Success status - True if application was launched successfully, False otherwise
     """
     system = platform.system()
     
+    # Try using the full path if provided
     if app_path and os.path.exists(app_path):
         try:
             if system == "Windows":
-                subprocess.Popen([app_path], shell=True)
+                process = subprocess.Popen([app_path], shell=True)
             else:
-                subprocess.Popen([app_path])
-            return True
+                process = subprocess.Popen([app_path])
+            
+            # Check if process is still running after a brief moment
+            import time
+            time.sleep(0.5)
+            if process.poll() is None:  # None means still running
+                return True
+            # If process exited immediately, it might be an error
+            return process.returncode == 0
         except Exception as e:
             print(f"Error launching application from path {app_path}: {e}")
             return False
     
+    # Platform-specific application launch methods
     if system == "Windows":
         try:
-            subprocess.Popen([app_name], shell=True)
-            return True
+            process = subprocess.Popen([app_name], shell=True)
+            import time
+            time.sleep(0.5)
+            if process.poll() is None:  # None means still running
+                return True
+            return process.returncode == 0
         except Exception as e:
             print(f"Error launching application {app_name}: {e}")
             return False
     elif system == "Darwin":  # macOS
         try:
             script = f"""
-            tell application "{app_name}" to activate
+            tell application "{app_name}"
+                activate
+            end tell
             """
             result = subprocess.run(['osascript', '-e', script], 
                                   capture_output=True, text=True)
-            return result.returncode == 0
+            
+            # Check if the application is actually running now
+            verify_script = f"""
+            tell application "System Events"
+                return exists process "{app_name}"
+            end tell
+            """
+            verify_result = subprocess.run(['osascript', '-e', verify_script], 
+                                        capture_output=True, text=True)
+            
+            return "true" in verify_result.stdout.lower()
         except Exception as e:
             print(f"Error launching application {app_name}: {e}")
             return False
@@ -341,11 +366,31 @@ def launch_application(app_name: str, app_path: str = None) -> bool:
             
             for method in methods:
                 try:
-                    subprocess.Popen(method, 
-                                   stdout=subprocess.DEVNULL, 
-                                   stderr=subprocess.DEVNULL)
-                    return True
-                except:
+                    process = subprocess.Popen(method, 
+                                            stdout=subprocess.DEVNULL, 
+                                            stderr=subprocess.DEVNULL)
+                    
+                    # Check if process is still running after a brief moment
+                    import time
+                    time.sleep(0.5)
+                    
+                    # First, check if the process we launched is still running
+                    if process.poll() is None:
+                        return True
+                    
+                    # If the process exited, it might have spawned another process
+                    # Let's check if a process with the app_name is running
+                    try:
+                        # Use ps and grep to find if the application is running
+                        check_cmd = f"ps aux | grep -i '{app_name}' | grep -v grep"
+                        check_result = subprocess.run(check_cmd, shell=True, stdout=subprocess.PIPE)
+                        if check_result.stdout and len(check_result.stdout) > 0:
+                            return True
+                    except Exception as check_err:
+                        print(f"Error checking if app is running: {check_err}")
+                
+                except Exception as method_err:
+                    print(f"Error with launch method {method}: {method_err}")
                     continue
                     
             return False

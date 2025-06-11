@@ -362,7 +362,7 @@ def cv_detect_and_analyze_regions(image_data: bytes) -> List[Dict[str, Any]]:
 
 def get_screenshot_with_analysis(
     monitor_id: int = 0,
-) -> Tuple[Optional[bytes], Optional[Dict[str, Any]], Optional[Any], Optional[Any], Optional[List[Dict[str, Any]]]]:
+) -> Tuple[Optional[bytes], Optional[Dict[str, Any]], Optional[List[Dict[str, Any]]], Optional[List[Dict[str, Any]]], Optional[List[Dict[str, Any]]]]:
     try:
         # Get monitor information
         with mss.mss() as sct:
@@ -402,27 +402,163 @@ def get_screenshot_with_analysis(
         return None, None, None, None, None
 
 def cv_find_all_buttons(image_data: bytes):
-    nparr = np.frombuffer(image_data, np.uint8)
-    img = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
+    """
+    Find button-like elements in an image with improved detection for styled UI buttons.
+    
+    Args:
+        image_data: Raw image data in bytes
+        
+    Returns:
+        List of tuples with format (button_text, (x, y, w, h))
+    """
+    try:
+        print("Looking for buttons in image...")
+        
+        if not image_data:
+            print("Error: No image data provided")
+            return []
+            
+        # Convert bytes to OpenCV image
+        nparr = np.frombuffer(image_data, np.uint8)
+        img = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
+        
+        if img is None:
+            print("Error: Failed to decode image data")
+            return []
+            
+        # Create a copy of the original image
+        original_img = img.copy()
+        height, width = img.shape[:2]
+        
+        # Convert to HSV for color-based detection (good for colorful buttons)
+        hsv = cv2.cvtColor(img, cv2.COLOR_BGR2HSV)
+        
+        # Convert to grayscale for shape-based detection
+        gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+        blur = cv2.GaussianBlur(gray, (5, 5), 0)
+        
+        # Apply thresholding - using multiple approaches for better detection
+        _, thresh1 = cv2.threshold(blur, 180, 255, cv2.THRESH_BINARY_INV)
+        
+        # Also try adaptive thresholding
+        adaptive_thresh = cv2.adaptiveThreshold(blur, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C, 
+                                              cv2.THRESH_BINARY_INV, 11, 2)
+        
+        # Combine the thresholds
+        combined_thresh = cv2.bitwise_or(thresh1, adaptive_thresh)
+        
+        # Find contours in both thresholded images
+        contours1, _ = cv2.findContours(thresh1, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+        contours2, _ = cv2.findContours(adaptive_thresh, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+        all_contours = contours1 + contours2
+        
+        # More reasonable minimum size - at least 40 pixels wide or 3% of the screen width
+        min_width = max(40, width * 0.03)
+        min_height = max(15, height * 0.02)
+        
+        # Max size - not more than 30% of the screen dimension
+        max_width = width * 0.3
+        max_height = height * 0.15
+        
+        # Store detected buttons
+        buttons = []
+        button_regions = []  # To avoid duplicates
+        
+        # Process each contour
+        for cnt in all_contours:
+            x, y, w, h = cv2.boundingRect(cnt)
+            
+            # Skip if too small
+            if w < min_width or h < min_height:
+                continue
+                
+            # Skip if too large
+            if w > max_width or h > max_height:
+                continue
 
-    gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
-    blur = cv2.GaussianBlur(gray, (5, 5), 0)
-    _, thresh = cv2.threshold(blur, 180, 255, cv2.THRESH_BINARY_INV)
-
-    contours, _ = cv2.findContours(thresh, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-
-    buttons = []
-    for cnt in contours:
-        x, y, w, h = cv2.boundingRect(cnt)
-        if w < 30 or h < 15 or w / h < 1.5:
-            continue
-
-        roi = img[y:y+h, x:x+w]
-        text = pytesseract.image_to_string(roi, config='--psm 7').strip()
-        if text:
-            buttons.append((text, (x, y, w, h)))
-
-    return buttons
+            # Calculate aspect ratio
+            aspect_ratio = float(w) / h
+            
+            # Most buttons are wider than tall with reasonable limits
+            # This is more flexible than previous criterion (w/h < 1.5)
+            if not (1.2 <= aspect_ratio <= 6.0):
+                continue
+                
+            # Check if this region overlaps with already detected buttons
+            is_duplicate = False
+            for bx, by, bw, bh in button_regions:
+                # Calculate overlap
+                overlap_x = max(0, min(x + w, bx + bw) - max(x, bx))
+                overlap_y = max(0, min(y + h, by + bh) - max(y, by))
+                overlap_area = overlap_x * overlap_y
+                current_area = w * h
+                
+                # If significant overlap, consider it a duplicate
+                if overlap_area > 0.5 * current_area:
+                    is_duplicate = True
+                    break
+                    
+            if is_duplicate:
+                continue
+                
+            # Extract region from original image
+            roi = original_img[y:y+h, x:x+w]
+            
+            # Check color properties for button-like appearance
+            hsv_roi = hsv[y:y+h, x:x+w]
+            
+            # Check if this region has button-like color properties
+            # (e.g., consistent color, possible border)
+            
+            # Calculate color histogram
+            hist = cv2.calcHist([hsv_roi], [0, 1], None, [30, 30], [0, 180, 0, 256])
+            cv2.normalize(hist, hist, 0, 1, cv2.NORM_MINMAX)
+            
+            # Calculate color concentration (higher values indicate more solid color regions)
+            color_concentration = np.max(hist)
+            
+            # Extract text using OCR
+            text = pytesseract.image_to_string(roi, config='--psm 7 --oem 1').strip()
+            
+            # Special case for stylized text that OCR might miss
+            if not text:
+                # Check for the green PLAY button in Minecraft
+                # Green color detection in HSV
+                lower_green = np.array([40, 40, 40])
+                upper_green = np.array([80, 255, 255])
+                green_mask = cv2.inRange(hsv_roi, lower_green, upper_green)
+                green_ratio = np.count_nonzero(green_mask) / (w * h)
+                
+                # If a significant portion is green and shape is button-like, likely a PLAY button
+                if green_ratio > 0.4 and 2.0 <= aspect_ratio <= 3.5:
+                    text = "PLAY"
+                    print(f"Detected stylized PLAY button based on color at ({x}, {y}, {w}, {h})")
+            
+            # If we found text or it has strong button-like appearance
+            if text or color_concentration > 0.3:
+                button_text = text if text else "Button"
+                button_info = {
+                    "text": button_text,
+                    "position": {
+                        "x": x,
+                        "y": y,
+                        "width": w,
+                        "height": h,
+                        "center_x": x + w // 2,
+                        "center_y": y + h // 2
+                    }
+                }
+                buttons.append(button_info)
+                button_regions.append((x, y, w, h))
+                print(f"Found button '{button_text}' at ({x}, {y}, {w}, {h})")
+        
+        print(f"Found {len(buttons)} buttons in total")
+        return buttons
+    except Exception as e:
+        import traceback
+        print(f"Error finding buttons: {str(e)}")
+        traceback.print_exc()
+        return []
 
 def cv_find_checkboxes(image_data: bytes):
     """
@@ -837,7 +973,7 @@ def analyze_window(window_title: str = None, window_id: str = None) -> Dict[str,
                 "window_info": target_window
             }
         
-        # Detect UI elements
+        # Detect UI elements - using the new enhanced button detection
         ui_buttons = cv_find_all_buttons(window_image)
         ui_checkboxes = cv_find_checkboxes(window_image)
         
@@ -847,8 +983,8 @@ def analyze_window(window_title: str = None, window_id: str = None) -> Dict[str,
         # Combine results
         result = {
             "caption": analysis_results.get("caption", ""),
-            "ui_buttons": ui_buttons,
-            "ui_checkboxes": ui_checkboxes,
+            "buttons": ui_buttons,  # This now contains our enhanced button detection
+            "checkboxes": ui_checkboxes,
             "ui_regions": ui_regions,
             "window_info": target_window
         }
