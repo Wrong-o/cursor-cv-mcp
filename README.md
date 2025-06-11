@@ -1,6 +1,8 @@
 # pinoMCP
 
 *Give your AI-agent tools to behave like a real person*
+
+
 **PLEASE OBSERVE THAT THIS MCP GIVES ACCESS TO YOUR FILES, SYSTEM INFORMATION AND CAN NAVIGATE UIS. USE PROPER PERCAUSION**
 
 ## Navigation tools
