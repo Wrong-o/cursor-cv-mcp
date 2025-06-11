@@ -9,6 +9,7 @@ import tempfile
 import traceback
 import os
 import time
+import PIL
 
 # Ensure required packages are available
 try:
@@ -179,25 +180,45 @@ def analyze_image(image_data: bytes) -> Dict[str, Any]:
     Returns:
         Dict containing analysis results
     """
-    # Get cached or load BLIP model
-    processor, model = load_blip_model()
+    # Validate image data
+    if not image_data or len(image_data) == 0:
+        print("Error: Empty image data provided to analyze_image")
+        return {"caption": "No image data available", "error": "Empty image data"}
     
-    image = Image.open(io.BytesIO(image_data))
-    inputs = processor(image, return_tensors="pt")
-    
-    # Move inputs to the same device as model
-    inputs = {k: v.to(device) for k, v in inputs.items()}
-    
-    with torch.no_grad():  # Disable gradient calculation for inference
-        out = model.generate(**inputs, max_new_tokens=blip_config["max_new_tokens"])
-    caption = processor.decode(out[0], skip_special_tokens=True)
-    print(f"Caption: {caption}")
-    
-    # Clear CUDA cache to prevent memory leaks if using GPU
-    if torch.cuda.is_available():
-        torch.cuda.empty_cache()
-    
-    return {"caption": caption}
+    try:
+        # Try to validate the image data first
+        image_io = io.BytesIO(image_data)
+        img_check = Image.open(image_io)
+        img_check.verify()  # Verify image data is valid
+        image_io.seek(0)  # Reset file pointer
+        
+        # Get cached or load BLIP model
+        processor, model = load_blip_model()
+        
+        image = Image.open(image_io)
+        inputs = processor(image, return_tensors="pt")
+        
+        # Move inputs to the same device as model
+        inputs = {k: v.to(device) for k, v in inputs.items()}
+        
+        with torch.no_grad():  # Disable gradient calculation for inference
+            out = model.generate(**inputs, max_new_tokens=blip_config["max_new_tokens"])
+        caption = processor.decode(out[0], skip_special_tokens=True)
+        print(f"Caption: {caption}")
+        
+        # Clear CUDA cache to prevent memory leaks if using GPU
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+        
+        return {"caption": caption}
+    except PIL.UnidentifiedImageError as e:
+        print(f"UnidentifiedImageError in analyze_image: {e}")
+        return {"caption": "Could not identify image format", "error": str(e)}
+    except Exception as e:
+        import traceback
+        print(f"Error in analyze_image: {e}")
+        traceback.print_exc()
+        return {"caption": "Error analyzing image", "error": str(e)}
 
 def cv_detect_and_analyze_regions(image_data: bytes) -> List[Dict[str, Any]]:
     """
@@ -724,6 +745,8 @@ def analyze_window(window_title: str = None, window_id: str = None) -> Dict[str,
     window_image = None
     window_info = None
     
+    print(f"Analyzing window with ID {window_id} and title {window_title}")
+    
     # Find window info based on title or ID
     windows = []
     try:
@@ -775,6 +798,19 @@ def analyze_window(window_title: str = None, window_id: str = None) -> Dict[str,
         try:
             print(f"Failed to capture window: {window_title or window_id}, falling back to full screen capture")
             window_image = get_screenshot(1)
+            
+            # Validate the screenshot data
+            if not window_image or len(window_image) == 0:
+                print("Error: Failed to capture screenshot")
+                return {"error": "Failed to capture valid screenshot"}
+                
+            # Verify image data is valid
+            try:
+                test_img = Image.open(io.BytesIO(window_image))
+                test_img.verify()
+            except Exception as e:
+                print(f"Invalid screenshot data: {e}")
+                return {"error": f"Invalid screenshot data: {str(e)}"}
         except Exception as e:
             import traceback
             print(f"Error during fallback screenshot: {e}")
@@ -783,8 +819,23 @@ def analyze_window(window_title: str = None, window_id: str = None) -> Dict[str,
     
     # Analyze the window content
     try:
+        # Validate the window_image data
+        if not window_image or len(window_image) == 0:
+            print("Error: Empty window image data")
+            return {"error": "Empty window image data"}
+            
         # Analyze image content
         analysis_results = analyze_image(window_image)
+        
+        # Check if analysis failed
+        if "error" in analysis_results:
+            print(f"Analysis error: {analysis_results.get('error')}")
+            # Return partial results with the error
+            return {
+                "caption": analysis_results.get("caption", ""),
+                "error": analysis_results.get("error", "Unknown analysis error"),
+                "window_info": target_window
+            }
         
         # Detect UI elements
         ui_buttons = cv_find_all_buttons(window_image)
@@ -1027,7 +1078,16 @@ def _capture_window_linux(window_info=None, window_title=None, window_id=None) -
                         
                         buf = io.BytesIO()
                         img.save(buf, format='JPEG')
-                        return buf.getvalue()
+                        img_data = buf.getvalue()
+                        
+                        # Validate the image data
+                        try:
+                            test_img = Image.open(io.BytesIO(img_data))
+                            test_img.verify()  # Verify image data is valid
+                            return img_data
+                        except Exception as e:
+                            print(f"Invalid image data from mss: {e}")
+                            # Continue to alternative methods
                 except Exception as e:
                     print(f"Error using mss for window capture: {e}")
                     # Continue to alternative methods
@@ -1082,8 +1142,15 @@ def _capture_window_linux(window_info=None, window_title=None, window_id=None) -
                             os.unlink(temp_path)
                         except:
                             pass
-                            
-                        return img_data
+                        
+                        # Validate the image data
+                        try:
+                            test_img = Image.open(io.BytesIO(img_data))
+                            test_img.verify()  # Verify image data is valid
+                            return img_data
+                        except Exception as e:
+                            print(f"Invalid image data from command-line tools: {e}")
+                            # Continue to fallback
                 except subprocess.TimeoutExpired:
                     print("Screenshot command timed out")
                 except Exception as e:
@@ -1100,7 +1167,20 @@ def _capture_window_linux(window_info=None, window_title=None, window_id=None) -
         
         # Fall back to full screen capture if all else fails
         print("Falling back to full screen capture")
-        return get_screenshot(1)
+        try:
+            img_data = get_screenshot(1)
+            
+            # Validate the fallback image data
+            try:
+                test_img = Image.open(io.BytesIO(img_data))
+                test_img.verify()  # Verify image data is valid
+                return img_data
+            except Exception as e:
+                print(f"Invalid image data from fallback screenshot: {e}")
+                return None
+        except Exception as e:
+            print(f"Error during fallback screenshot: {e}")
+            return None
     except Exception as e:
         import traceback
         print(f"Error capturing window on Linux: {e}")
