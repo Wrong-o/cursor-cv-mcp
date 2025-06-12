@@ -1,31 +1,42 @@
 # pinoMCP
 
-*Give your AI-agent tools to behave like a real person*
+*Give your AI agent tools to behave like a real person*
 
+> **⚠️ WARNING:** This MCP grants access to your files, system information, and can navigate UIs. **USE WITH PROPER PRECAUTION.**
 
-**PLEASE OBSERVE THAT THIS MCP GIVES ACCESS TO YOUR FILES, SYSTEM INFORMATION AND CAN NAVIGATE UIS. USE PROPER PERCAUSION**
+---
 
-## Navigation tools
+## 🔧 Features
 
-- Mouse and keyboard
-    - Clicking
-    - Typing
-    - Key combination 
-- Knowledge of local system
-    - Operating system
-    - Keyboard layout
-    - Active windows
-- Computer vision identifies
-    - UI elements
-    - Images
-    - Text
-- System Control
-    - Open folders
-    - See folder content
-    - Start programs
-- Voice feedback
-    - Read text or summaries
+### 🖱️ Mouse and Keyboard
+- Clicking  
+- Typing  
+- Key combinations  
 
+### 🧠 System Awareness
+- Detects operating system  
+- Knows keyboard layout  
+- Tracks active windows  
 
+### 🖼️ Computer Vision
+- Identifies UI elements  
+- Detects images  
+- Reads text on screen  
 
-This MCP was developed for Cursor IDE and tested using Anthropics models, there is no garantuee that it will work on other systems.
+### 💻 System Control
+- Opens folders  
+- Views folder contents  
+- Starts programs  
+
+### 🔊 Voice Feedback
+- Reads text aloud  
+- Summarizes content  
+
+---
+
+## 🧪 Compatibility
+
+Developed for **Cursor IDE**  
+Tested using **Anthropic's models**  
+❗ No guarantee of functionality outside this environment.
+
