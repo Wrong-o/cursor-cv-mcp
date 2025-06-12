@@ -10,7 +10,7 @@ import traceback
 import os
 import time
 import PIL
-
+from transformers import Blip2Processor, Blip2ForConditionalGeneration
 # Ensure required packages are available
 try:
     import mss
@@ -92,42 +92,37 @@ try:
 except ImportError:
     print("torch/transformers not found - some AI vision features will be limited")
 
-# Configuration
-BLIP_MODEL_LOADED = False
-BLIP_MODEL = None
-
-# Configuration
-debug = False  # Debug mode flag
-# Check if CUDA is available
+# Config
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-# BLIP model configuration
 blip_config = {
-    "model_name": "Salesforce/blip-image-captioning-base",
+    "model_name": "Salesforce/blip-image-captioning-base",  # BLIP-1
     "max_new_tokens": 200,
-    "torch_dtype": torch.float16 if torch.cuda.is_available() else torch.float32  # Use half precision if CUDA is available
+    "torch_dtype": torch.float16 if torch.cuda.is_available() else torch.float32
 }
 print(f"Using device: {device}")
 
-# Initialize BLIP model and processor globally to avoid reloading
-blip_processor = None
-blip_model = None
+# Load BLIP-1
+blip_processor = BlipProcessor.from_pretrained(blip_config["model_name"])
+blip_model = BlipForConditionalGeneration.from_pretrained(
+    blip_config["model_name"],
+    torch_dtype=blip_config["torch_dtype"]
+).to(device)
+
+BLIP_MODEL_LOADED = True
+BLIP_MODEL = blip_model
 
 def load_blip_model():
-    """
-    Load BLIP model and processor only once and cache them.
-    """
     global blip_processor, blip_model
     if blip_processor is None or blip_model is None:
-        print("Loading BLIP model...")
-        blip_processor = BlipProcessor.from_pretrained(blip_config["model_name"])
-        blip_model = BlipForConditionalGeneration.from_pretrained(
+        print("Loading BLIP-2 model...")
+        blip_processor = Blip2Processor.from_pretrained(blip_config["model_name"])
+        blip_model = Blip2ForConditionalGeneration.from_pretrained(
             blip_config["model_name"],
-            torch_dtype=blip_config["torch_dtype"]
+            torch_dtype=blip_config["torch_dtype"],
+            device_map="auto"  # handles GPU/CPU automatically
         )
-        blip_model = blip_model.to(device)
-        print("BLIP model loaded successfully.")
+        print("BLIP-2 model loaded successfully.")
     return blip_processor, blip_model
-
 def get_available_monitors():
         try:
             with mss.mss() as sct:
@@ -170,7 +165,7 @@ def get_screenshot(monitor_id: int = 1) -> bytes:
         img.save(buf, format='JPEG')
         return buf.getvalue()
 
-def analyze_image(image_data: bytes) -> Dict[str, Any]:
+def caption_image(image_data: bytes) -> Dict[str, Any]:
     """
     Analyze the image content.
     
@@ -182,7 +177,7 @@ def analyze_image(image_data: bytes) -> Dict[str, Any]:
     """
     # Validate image data
     if not image_data or len(image_data) == 0:
-        print("Error: Empty image data provided to analyze_image")
+        print("Error: Empty image data provided to caption_image")
         return {"caption": "No image data available", "error": "Empty image data"}
     
     try:
@@ -211,12 +206,13 @@ def analyze_image(image_data: bytes) -> Dict[str, Any]:
             torch.cuda.empty_cache()
         
         return {"caption": caption}
+
     except PIL.UnidentifiedImageError as e:
-        print(f"UnidentifiedImageError in analyze_image: {e}")
+        print(f"UnidentifiedImageError in caption_image: {e}")
         return {"caption": "Could not identify image format", "error": str(e)}
     except Exception as e:
         import traceback
-        print(f"Error in analyze_image: {e}")
+        print(f"Error in caption_image: {e}")
         traceback.print_exc()
         return {"caption": "Error analyzing image", "error": str(e)}
 
@@ -389,12 +385,21 @@ def get_screenshot_with_analysis(
             
             # Analyze the image
             print("\nAnalyzing screenshot...")
-            analysis_results = analyze_image(image_data)
+            analysis_results = caption_image(image_data)
             ui_buttons = cv_find_all_buttons(image_data)
             ui_checkboxes = cv_find_checkboxes(image_data)
             
             # Detect and analyze image-like regions
             ui_regions = cv_detect_and_analyze_regions(image_data)
+            
+            # ADDED: Filter out buttons with text "Button"
+            if ui_buttons:
+                filtered_buttons = []
+                for button in ui_buttons:
+                    if button.get("text") != "Button":
+                        filtered_buttons.append(button)
+                print(f"Filtered out {len(ui_buttons) - len(filtered_buttons)} buttons with generic 'Button' text")
+                ui_buttons = filtered_buttons
             
             return image_data, analysis_results, ui_buttons, ui_checkboxes, ui_regions
     except Exception as e:
@@ -412,7 +417,7 @@ def cv_find_all_buttons(image_data: bytes):
         List of tuples with format (button_text, (x, y, w, h))
     """
     try:
-        print("Looking for buttons in image...")
+        print("Looking for buttons in image with enhanced detection...")
         
         if not image_data:
             print("Error: No image data provided")
@@ -464,6 +469,68 @@ def cv_find_all_buttons(image_data: bytes):
         buttons = []
         button_regions = []  # To avoid duplicates
         
+        # First, apply direct OCR to look for prominent text that might be button labels
+        # This helps identify UI text without relying solely on contour detection
+        direct_text_results = pytesseract.image_to_data(original_img, output_type=pytesseract.Output.DICT)
+        
+        # Look for common UI button texts - BE MORE SPECIFIC to avoid false positives
+        common_button_texts = ["play", "start game", "single player", "multiplayer", "options", "settings", 
+                              "quit", "exit", "cancel", "ok", "yes", "no", "next", "back", "continue"]
+        
+        direct_button_regions = []
+        for i, text in enumerate(direct_text_results["text"]):
+            if not text or len(text) < 5:  # CHANGED: Increased minimum text length from 4 to 5 characters
+                continue
+                
+            # Check confidence
+            confidence = int(direct_text_results["conf"][i])
+            if confidence < 80:  # INCREASED confidence threshold (was 70)
+                continue
+                
+            text_lower = text.lower()
+            x, y, w, h = (direct_text_results["left"][i], direct_text_results["top"][i],
+                        direct_text_results["width"][i], direct_text_results["height"][i])
+            
+            # Skip if the width-to-height ratio is too extreme
+            aspect_ratio = float(w) / h if h > 0 else 0
+            if aspect_ratio > 8.0 or aspect_ratio < 1.0:  # ADDED aspect ratio check
+                continue
+            
+            # Expand region slightly to capture button borders
+            expanded_x = max(0, x - int(w * 0.2))
+            expanded_y = max(0, y - int(h * 0.2))
+            expanded_w = min(width - expanded_x, int(w * 1.4))
+            expanded_h = min(height - expanded_y, int(h * 1.4))
+            
+            # STRICTER button text matching - must be an exact match to common button texts or
+            # have specific visual characteristics of buttons
+            is_button_text = text_lower in common_button_texts
+            
+            # Additional checks for "PLAY" to avoid false positives
+            if text.upper() == "PLAY" or text_lower == "play":
+                # Check if this is inside a button-like UI element
+                # Extract the region around the text to check for button-like appearance
+                region_x = max(0, x - w)
+                region_y = max(0, y - h)
+                region_w = min(width - region_x, w * 3)
+                region_h = min(height - region_y, h * 3)
+                
+                if region_x < width and region_y < height and region_w > 0 and region_h > 0:
+                    region = original_img[region_y:region_y+region_h, region_x:region_x+region_w]
+                    
+                    # Check for visual button-like features
+                    region_gray = cv2.cvtColor(region, cv2.COLOR_BGR2GRAY)
+                    edges = cv2.Canny(region_gray, 50, 150)
+                    edge_density = np.count_nonzero(edges) / (region_w * region_h)
+                    
+                    # Buttons typically have edges/borders
+                    if edge_density < 0.1:  # Not enough edges to be a button
+                        continue
+            
+            if is_button_text:
+                print(f"Found potential button text '{text}' at ({x}, {y}, {w}, {h}) with confidence {confidence}")
+                direct_button_regions.append((expanded_x, expanded_y, expanded_w, expanded_h, text, confidence))
+        
         # Process each contour
         for cnt in all_contours:
             x, y, w, h = cv2.boundingRect(cnt)
@@ -504,11 +571,18 @@ def cv_find_all_buttons(image_data: bytes):
             # Extract region from original image
             roi = original_img[y:y+h, x:x+w]
             
+            # ADDED: Check for visual button-like features
+            # Buttons typically have distinct edges or borders
+            roi_gray = cv2.cvtColor(roi, cv2.COLOR_BGR2GRAY)
+            edges = cv2.Canny(roi_gray, 50, 150)
+            edge_density = np.count_nonzero(edges) / (w * h)
+            
+            # If edge density is too low, this is likely not a button (just a plain region)
+            if edge_density < 0.05:
+                continue
+            
             # Check color properties for button-like appearance
             hsv_roi = hsv[y:y+h, x:x+w]
-            
-            # Check if this region has button-like color properties
-            # (e.g., consistent color, possible border)
             
             # Calculate color histogram
             hist = cv2.calcHist([hsv_roi], [0, 1], None, [30, 30], [0, 180, 0, 256])
@@ -517,25 +591,101 @@ def cv_find_all_buttons(image_data: bytes):
             # Calculate color concentration (higher values indicate more solid color regions)
             color_concentration = np.max(hist)
             
-            # Extract text using OCR
-            text = pytesseract.image_to_string(roi, config='--psm 7 --oem 1').strip()
+            # Enhanced OCR preprocessing for better text extraction
+            # Try multiple preprocessing approaches
+            ocr_texts = []
+            confidences = []
+            
+            # 1. Original ROI
+            ocr_result = pytesseract.image_to_data(roi, config='--psm 7 --oem 1', output_type=pytesseract.Output.DICT)
+            for i, txt in enumerate(ocr_result["text"]):
+                if txt and len(txt.strip()) > 3:
+                    ocr_texts.append(txt.strip())
+                    confidences.append(int(ocr_result["conf"][i]))
+            
+            # 2. Threshold version
+            roi_gray = cv2.cvtColor(roi, cv2.COLOR_BGR2GRAY)
+            _, roi_thresh = cv2.threshold(roi_gray, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+            ocr_result = pytesseract.image_to_data(roi_thresh, config='--psm 7 --oem 1', output_type=pytesseract.Output.DICT)
+            for i, txt in enumerate(ocr_result["text"]):
+                if txt and len(txt.strip()) > 3:
+                    ocr_texts.append(txt.strip())
+                    confidences.append(int(ocr_result["conf"][i]))
+                    
+            # 3. Contrast enhanced version
+            roi_contrast = cv2.convertScaleAbs(roi, alpha=1.5, beta=0)
+            ocr_result = pytesseract.image_to_data(roi_contrast, config='--psm 7 --oem 1', output_type=pytesseract.Output.DICT)
+            for i, txt in enumerate(ocr_result["text"]):
+                if txt and len(txt.strip()) > 3:
+                    ocr_texts.append(txt.strip())
+                    confidences.append(int(ocr_result["conf"][i]))
+                    
+            # Choose the best text based on confidence
+            text = ""
+            best_confidence = 0
+            if ocr_texts:
+                best_idx = np.argmax(confidences) if confidences else 0
+                text = ocr_texts[best_idx]
+                best_confidence = confidences[best_idx] if confidences else 0
+                print(f"Best OCR text: '{text}' with confidence {best_confidence}")
+            
+            # INCREASED confidence threshold for text
+            if best_confidence < 75:
+                text = ""
             
             # Special case for stylized text that OCR might miss
             if not text:
-                # Check for the green PLAY button in Minecraft
+                # Check for the green PLAY button in Minecraft - BE MORE SPECIFIC
                 # Green color detection in HSV
                 lower_green = np.array([40, 40, 40])
                 upper_green = np.array([80, 255, 255])
                 green_mask = cv2.inRange(hsv_roi, lower_green, upper_green)
                 green_ratio = np.count_nonzero(green_mask) / (w * h)
                 
-                # If a significant portion is green and shape is button-like, likely a PLAY button
-                if green_ratio > 0.4 and 2.0 <= aspect_ratio <= 3.5:
-                    text = "PLAY"
-                    print(f"Detected stylized PLAY button based on color at ({x}, {y}, {w}, {h})")
+                # ADDED MORE SPECIFIC CRITERIA for a Minecraft PLAY button
+                # If a significant portion is green, shape is button-like, and has button-like edges
+                if (green_ratio > 0.4 and 2.0 <= aspect_ratio <= 3.5 and 
+                    0.1 <= edge_density <= 0.5):  # Buttons have reasonable edge density
+                    # Check for rounded corners (typical of Minecraft buttons)
+                    approx = cv2.approxPolyDP(cnt, 0.04 * cv2.arcLength(cnt, True), True)
+                    if len(approx) > 4:  # More than 4 points suggests rounded corners
+                        text = "PLAY"
+                        print(f"Detected stylized PLAY button based on color at ({x}, {y}, {w}, {h})")
+                    
+                # Check for white text on dark background (common in games)
+                roi_gray = cv2.cvtColor(roi, cv2.COLOR_BGR2GRAY)
+                white_pixels = np.sum(roi_gray > 200)
+                dark_pixels = np.sum(roi_gray < 50)
+                white_ratio = white_pixels / (w * h)
+                dark_ratio = dark_pixels / (w * h)
+                
+                if white_ratio > 0.1 and dark_ratio > 0.4:
+                    # Apply inverse binary threshold to isolate white text
+                    _, white_text = cv2.threshold(roi_gray, 180, 255, cv2.THRESH_BINARY)
+                    text_result = pytesseract.image_to_string(white_text, config='--psm 7 --oem 1').strip()
+                    if text_result and len(text_result) > 3:
+                        text = text_result
+                        print(f"Detected white-on-dark text: '{text}' at ({x}, {y}, {w}, {h})")
             
-            # If we found text or it has strong button-like appearance
-            if text or color_concentration > 0.3:
+            # ADDED: More precise checks for adding buttons
+            should_add_button = False
+            
+            # 1. If we found text matching common button labels
+            common_button_keywords = ["play", "start", "options", "quit", "exit", "settings", 
+                                      "ok", "cancel", "yes", "no", "continue", "back", "next",
+                                      "single player", "multiplayer", "menu", "create"]
+            if text and any(keyword == text.lower() for keyword in common_button_keywords):
+                should_add_button = True
+            
+            # 2. If it has strong button-like visual appearance
+            elif color_concentration > 0.3 and 0.1 <= edge_density <= 0.5:
+                # Calculate the variance of colors to determine if it looks like a UI element
+                roi_std = np.std(roi_gray)
+                if roi_std > 20:  # Not a uniform region
+                    should_add_button = True
+            
+            # If button criteria satisfied, add it
+            if should_add_button or (text and len(text) > 3):
                 button_text = text if text else "Button"
                 button_info = {
                     "text": button_text,
@@ -552,7 +702,48 @@ def cv_find_all_buttons(image_data: bytes):
                 button_regions.append((x, y, w, h))
                 print(f"Found button '{button_text}' at ({x}, {y}, {w}, {h})")
         
-        print(f"Found {len(buttons)} buttons in total")
+        # Add the direct text buttons if they don't overlap with existing buttons
+        for ex, ey, ew, eh, text, conf in direct_button_regions:
+            is_duplicate = False
+            for bx, by, bw, bh in button_regions:
+                # Calculate overlap
+                overlap_x = max(0, min(ex + ew, bx + bw) - max(ex, bx))
+                overlap_y = max(0, min(ey + eh, by + bh) - max(ey, by))
+                overlap_area = overlap_x * overlap_y
+                direct_area = ew * eh
+                
+                # If significant overlap, consider it a duplicate
+                if overlap_area > 0.3 * direct_area:
+                    is_duplicate = True
+                    break
+                    
+            if not is_duplicate:
+                # ADDED: Extract the region to check if it has button-like appearance
+                if (ex >= 0 and ey >= 0 and ex + ew <= width and ey + eh <= height and 
+                    ew > 0 and eh > 0):
+                    region = original_img[ey:ey+eh, ex:ex+ew]
+                    region_gray = cv2.cvtColor(region, cv2.COLOR_BGR2GRAY)
+                    edges = cv2.Canny(region_gray, 50, 150)
+                    edge_density = np.count_nonzero(edges) / (ew * eh)
+                    
+                    # Only add if it has visual button-like characteristics
+                    if 0.05 <= edge_density <= 0.5:
+                        button_info = {
+                            "text": text,
+                            "position": {
+                                "x": ex,
+                                "y": ey,
+                                "width": ew,
+                                "height": eh,
+                                "center_x": ex + ew // 2,
+                                "center_y": ey + eh // 2
+                            }
+                        }
+                        buttons.append(button_info)
+                        button_regions.append((ex, ey, ew, eh))
+                        print(f"Found text button '{text}' at ({ex}, {ey}, {ew}, {eh})")
+        
+        print(f"Found {len(buttons)} buttons")
         return buttons
     except Exception as e:
         import traceback
@@ -734,7 +925,7 @@ def cv_find_checkboxes(image_data: bytes):
 
 def find_text_in_image(image_data: bytes, target: str):
     try:
-        print(f"Finding text '{target}' in image using enhanced detection...")
+        print(f"Finding text '{target}' in image using enhanced text detection...")
         
         if not image_data:
             print("Error: No image data provided to find_text_in_image")
@@ -751,6 +942,14 @@ def find_text_in_image(image_data: bytes, target: str):
         # Create a copy of the original image for visualization
         original_img = img.copy()
         height, width = img.shape[:2]
+        
+        # Pre-process target text for better matching
+        target_lower = target.lower().strip()
+        print(f"Searching for target text: '{target_lower}'")
+        
+        # Check if this is a long string search (more than 15 characters)
+        is_long_string = len(target_lower) > 15
+        print(f"Searching for {'long string' if is_long_string else 'short string'}")
         
         # Apply multiple preprocessing techniques to improve OCR
         preprocessed_images = []
@@ -776,92 +975,286 @@ def find_text_in_image(image_data: bytes, target: str):
         _, thresh_blurred = cv2.threshold(blurred, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
         preprocessed_images.append(("blurred_otsu", thresh_blurred))
         
+        # 6. High contrast enhancement (good for game UIs)
+        contrast_enhanced = cv2.convertScaleAbs(img, alpha=1.5, beta=0)
+        contrast_gray = cv2.cvtColor(contrast_enhanced, cv2.COLOR_BGR2GRAY)
+        _, contrast_thresh = cv2.threshold(contrast_gray, 150, 255, cv2.THRESH_BINARY)
+        preprocessed_images.append(("high_contrast", contrast_thresh))
+        
+        # 7. Color filtering for white text (common in games)
+        hsv = cv2.cvtColor(img, cv2.COLOR_BGR2HSV)
+        # Create a mask that captures white/light text
+        lower_white = np.array([0, 0, 180])
+        upper_white = np.array([180, 30, 255])
+        white_mask = cv2.inRange(hsv, lower_white, upper_white)
+        preprocessed_images.append(("white_text_mask", white_mask))
+        
+        # 8. Inverse for dark text on light background
+        inverse_mask = cv2.bitwise_not(white_mask)
+        preprocessed_images.append(("dark_text_mask", inverse_mask))
+        
+        # 9. Edge detection to highlight text boundaries
+        edges = cv2.Canny(gray, 100, 200)
+        dilated_edges = cv2.dilate(edges, np.ones((2, 2), np.uint8), iterations=1)
+        preprocessed_images.append(("edge_enhance", dilated_edges))
+        
         # Store all matches
         all_matches = []
-        target_lower = target.lower()
         
-        # Try each preprocessing method
-        for name, processed_img in preprocessed_images:
-            print(f"Trying OCR with {name} preprocessing...")
+        # For long strings, focus on paragraph detection
+        if is_long_string:
+            print("Using paragraph detection mode for long string")
+            # Use PSM modes optimized for paragraph text
+            psm_modes = [
+                ('--psm 3', 'Full page'),     # Fully automatic page segmentation
+                ('--psm 4', 'Single column'), # Assume a single column of variable-sized text
+                ('--psm 6', 'Block of text')  # Assume a uniform block of text
+            ]
             
-            # Get both standard string and detailed data with positions
-            text = pytesseract.image_to_string(processed_img).lower()
-            data = pytesseract.image_to_data(processed_img, output_type=pytesseract.Output.DICT)
-            
-            # Simple string matching for debugging
-            if target_lower in text:
-                print(f"Found target '{target}' in text with {name} preprocessing")
-            
-            # Extract matches from detailed data
-            for i, word in enumerate(data["text"]):
-                if not word:
-                    continue
+            # For each preprocessing method, try full page OCR
+            for name, processed_img in preprocessed_images:
+                for psm_config, psm_desc in psm_modes:
+                    print(f"Trying paragraph OCR with {name} preprocessing, {psm_desc}...")
                     
-                word_lower = word.lower()
-                # Try different matching strategies
-                if (target_lower in word_lower or  # Substring match
-                    word_lower in target_lower or  # Partial match
-                    # Fuzzy match (if words are similar enough)
-                    (len(target) > 3 and len(word) > 3 and 
-                     (target_lower[:3] == word_lower[:3] or 
-                      target_lower[-3:] == word_lower[-3:]))):
+                    # Extract full text using image_to_string for better paragraph handling
+                    full_text = pytesseract.image_to_string(processed_img, config=f'{psm_config} --oem 1').lower().strip()
                     
-                    confidence = data["conf"][i]
-                    # Filter low-confidence matches
-                    if confidence < 30:
+                    if not full_text:
                         continue
                         
-                    x, y, w, h = data["left"][i], data["top"][i], data["width"][i], data["height"][i]
+                    # Look for the target text in the extracted text using fuzzy matching
+                    if target_lower in full_text:
+                        # Exact match found
+                        print(f"Found exact match in paragraph: '{full_text[:50]}...'")
+                        match_score = 100
+                    else:
+                        # Try fuzzy matching
+                        import difflib
+                        similarity = difflib.SequenceMatcher(None, target_lower, full_text).ratio()
+                        
+                        # Only consider reasonable matches
+                        if similarity < 0.6:
+                            continue
+                            
+                        match_score = int(similarity * 100)
+                        print(f"Found fuzzy match (score: {match_score}): '{full_text[:50]}...'")
+                    
+                    # Create a match for the entire image as we don't have precise bounds
                     match_info = {
-                        "word": word,
-                        "bounds": (x, y, w, h),
-                        "confidence": confidence,
-                        "method": name
+                        "word": full_text,
+                        "bounds": (0, 0, width, height),  # Entire image
+                        "confidence": 70,  # Moderate confidence for paragraph matches
+                        "method": f"{name}_{psm_desc}_paragraph",
+                        "match_score": match_score,
+                        "is_paragraph": True
                     }
                     all_matches.append(match_info)
-                    print(f"Found match '{word}' at ({x}, {y}, {w}, {h}) with confidence {confidence}")
+            
+            # If we found paragraph matches, also try to find more precise locations
+            if all_matches:
+                # Try to narrow down the location by splitting the image
+                regions = []
+                # Split into a 3x3 grid for more precise location
+                h_step, w_step = height // 3, width // 3
+                for y in range(0, height, h_step):
+                    for x in range(0, width, w_step):
+                        # Ensure we don't go out of bounds
+                        region_w = min(w_step, width - x)
+                        region_h = min(h_step, height - y)
+                        regions.append((x, y, region_w, region_h))
+                
+                for x, y, w, h in regions:
+                    for name, processed_img in [("basic_gray", gray), ("threshold_150", thresh1)]:
+                        # Extract just this region
+                        region = processed_img[y:y+h, x:x+w]
+                        
+                        # Skip very small regions
+                        if w < 50 or h < 30:
+                            continue
+                            
+                        # Extract text from this region
+                        region_text = pytesseract.image_to_string(region, config='--psm 6 --oem 1').lower().strip()
+                        
+                        if not region_text or len(region_text) < 10:
+                            continue
+                            
+                        # Check if target text is in this region
+                        if target_lower in region_text:
+                            match_info = {
+                                "word": region_text,
+                                "bounds": (x, y, w, h),
+                                "confidence": 80,  # Higher confidence for region match
+                                "method": f"{name}_region",
+                                "match_score": 90,
+                                "is_paragraph": True
+                            }
+                            all_matches.append(match_info)
+                            print(f"Found region match at ({x},{y}): '{region_text[:30]}...'")
         
-        # Filter duplicates (matches at very similar positions)
-        filtered_matches = []
+        # Try different PSM modes for different text layouts
+        psm_modes = [
+            ('--psm 6', 'Block of text'),  # Assume a single uniform block of text
+            ('--psm 7', 'Single line'),    # Treat the image as a single text line
+            ('--psm 8', 'Word'),           # Treat the image as a single word
+            ('--psm 11', 'Sparse text'),   # Sparse text. Find as much text as possible in no particular order
+            ('--psm 12', 'Sparse text with OSD'),  # Sparse text with OSD
+            ('--psm 13', 'Raw line')       # Raw line. Treat the image as a single text line
+        ]
+        
+        # Try each preprocessing method with different PSM modes
+        for name, processed_img in preprocessed_images:
+            for psm_config, psm_desc in psm_modes:
+                print(f"Trying OCR with {name} preprocessing, {psm_desc}...")
+                
+                # Get both standard string and detailed data with positions
+                data = pytesseract.image_to_data(processed_img, config=f'{psm_config} --oem 1', output_type=pytesseract.Output.DICT)
+                
+                # Extract matches from detailed data
+                for i, word in enumerate(data["text"]):
+                    if not word or len(word.strip()) == 0:
+                        continue
+                        
+                    word_lower = word.lower().strip()
+                    confidence = float(data["conf"][i])
+                    
+                    # Skip very low confidence results but use lower threshold for longer strings
+                    min_confidence = 20 if len(word_lower) > 10 else 30
+                    if confidence < min_confidence:
+                        continue
+                    
+                    # Various matching strategies
+                    exact_match = target_lower == word_lower
+                    contains_match = target_lower in word_lower or word_lower in target_lower
+                    
+                    # Special case for UI elements: Check if first few chars match (for partially detected text)
+                    prefix_match = False
+                    suffix_match = False
+                    if len(target_lower) >= 3 and len(word_lower) >= 2:
+                        # Check if first 60% of characters match
+                        prefix_len = max(2, int(len(target_lower) * 0.6))
+                        if len(word_lower) >= prefix_len:
+                            prefix_match = target_lower[:prefix_len] == word_lower[:prefix_len]
+                        
+                        # Check if last few characters match
+                        suffix_len = max(2, int(len(target_lower) * 0.4))
+                        if len(word_lower) >= suffix_len:
+                            suffix_match = target_lower[-suffix_len:] == word_lower[-suffix_len:]
+                    
+                    # Fuzzy matching for longer text
+                    fuzzy_match = False
+                    fuzzy_score = 0
+                    if len(word_lower) > 5 and len(target_lower) > 5:
+                        import difflib
+                        similarity = difflib.SequenceMatcher(None, target_lower, word_lower).ratio()
+                        if similarity > 0.7:  # 70% similarity threshold
+                            fuzzy_match = True
+                            fuzzy_score = int(similarity * 100)
+                    
+                    # Calculate match score
+                    match_score = 0
+                    if exact_match:
+                        match_score = 100
+                    elif contains_match:
+                        match_score = 80
+                    elif fuzzy_match:
+                        match_score = fuzzy_score
+                    elif prefix_match:
+                        match_score = 60
+                    elif suffix_match:
+                        match_score = 50
+                    
+                    # Only consider reasonable matches
+                    if match_score > 0:
+                        x, y, w, h = data["left"][i], data["top"][i], data["width"][i], data["height"][i]
+                        
+                        # Skip if region is too small
+                        if w < 5 or h < 5:
+                            continue
+                            
+                        match_info = {
+                            "word": word,
+                            "bounds": (x, y, w, h),
+                            "confidence": confidence,
+                            "method": f"{name}_{psm_desc}",
+                            "match_score": match_score,
+                            "is_paragraph": False
+                        }
+                        all_matches.append(match_info)
+                        print(f"Found match '{word}' for '{target}' at ({x}, {y}, {w}, {h}) with confidence {confidence}, score {match_score}")
+        
+        # Special case: Try direct extraction of common game UI elements
+        common_ui_texts = ["play", "single player", "multiplayer", "options", "quit", "settings", 
+                          "start", "continue", "exit", "main menu", "save", "load"]
+                          
+        if target_lower in common_ui_texts:
+            print("Target is a common UI element, trying specialized detection...")
+            
+            # Try detecting high-contrast regions that might contain buttons
+            for processed_img in [thresh1, adaptive_thresh, contrast_thresh, white_mask]:
+                # Find contours in the processed image
+                contours, _ = cv2.findContours(processed_img, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+                
+                for cnt in contours:
+                    x, y, w, h = cv2.boundingRect(cnt)
+                    
+                    # Skip very small regions
+                    if w < 40 or h < 15:
+                        continue
+                        
+                    # Skip very large regions
+                    if w > width * 0.3 or h > height * 0.15:
+                        continue
+                    
+                    # Extract the region
+                    roi = original_img[y:y+h, x:x+w]
+                    
+                    # Try different preprocessing on this region
+                    roi_gray = cv2.cvtColor(roi, cv2.COLOR_BGR2GRAY)
+                    _, roi_thresh = cv2.threshold(roi_gray, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+                    
+                    # Enlarge image for better OCR (gaming fonts are often stylized)
+                    enlarged_roi = cv2.resize(roi_thresh, (w*3, h*3), interpolation=cv2.INTER_CUBIC)
+                    
+                    # Apply OCR with gaming-optimized settings
+                    text = pytesseract.image_to_string(enlarged_roi, config='--psm 7 --oem 1').lower().strip()
+                    
+                    # Check if it matches our target
+                    if target_lower in text or text in target_lower:
+                        match_score = 70  # Good score for UI element detection
+                        match_info = {
+                            "word": text,
+                            "bounds": (x, y, w, h),
+                            "confidence": 70,  # Reasonable confidence for UI element
+                            "method": "specialized_ui_detection",
+                            "match_score": match_score,
+                            "is_paragraph": False
+                        }
+                        all_matches.append(match_info)
+                        print(f"Found UI element match '{text}' at ({x}, {y}, {w}, {h})")
+        
+        # Sort matches by match score and confidence
+        all_matches.sort(key=lambda x: (x["match_score"], x["confidence"]), reverse=True)
+        
+        # Group matches by method to avoid duplicates
+        grouped_matches = {}
         for match in all_matches:
-            x1, y1, w1, h1 = match["bounds"]
-            center1 = (x1 + w1//2, y1 + h1//2)
-            
-            # Check if this match is too close to any existing filtered match
-            is_duplicate = False
-            for filtered in filtered_matches:
-                x2, y2, w2, h2 = filtered["bounds"]
-                center2 = (x2 + w2//2, y2 + h2//2)
+            method = match["method"]
+            if method not in grouped_matches or match["match_score"] > grouped_matches[method]["match_score"]:
+                grouped_matches[method] = match
                 
-                # Calculate distance between centers
-                distance = ((center1[0] - center2[0])**2 + (center1[1] - center2[1])**2)**0.5
-                
-                # If centers are close, consider it a duplicate
-                if distance < max(w1, h1, w2, h2) * 0.5:
-                    is_duplicate = True
-                    # Keep the match with higher confidence
-                    if match["confidence"] > filtered["confidence"]:
-                        filtered_matches.remove(filtered)
-                        filtered_matches.append(match)
-                    break
-            
-            if not is_duplicate:
-                filtered_matches.append(match)
+        # Return the best matches
+        best_matches = list(grouped_matches.values())
+        best_matches.sort(key=lambda x: (x["match_score"], x["confidence"]), reverse=True)
         
-        # Prepare final result
-        result = []
-        for match in filtered_matches:
-            result.append((match["word"], match["bounds"]))
-            
-        print(f"Found {len(result)} unique matches for '{target}'")
-        return result
+        # Limit to top 5 best matches
+        return best_matches[:5]
     except Exception as e:
         import traceback
         print(f"Error in find_text_in_image: {str(e)}")
         traceback.print_exc()
         return []
 
-def analyze_window(window_title: str = None, window_id: str = None) -> Dict[str, Any]:
+def caption_window(window_title: str = None, window_id: str = None) -> Dict[str, Any]:
     """
     Capture and analyze a specific window's content across platforms.
     
@@ -872,10 +1265,6 @@ def analyze_window(window_title: str = None, window_id: str = None) -> Dict[str,
     Returns:
         Dict containing analysis results with:
         - caption: Description of the window content
-        - ui_buttons: Detected buttons in the window
-        - ui_checkboxes: Detected checkboxes in the window
-        - ui_regions: Detected image regions with captions
-        - window_info: Metadata about the window
     """
     system = platform.system()
     window_image = None
@@ -928,65 +1317,17 @@ def analyze_window(window_title: str = None, window_id: str = None) -> Dict[str,
         traceback.print_exc()
         return {"error": f"Error capturing window: {str(e)}"}
     
-    # If window capture failed
-    if window_image is None:
-        # Fall back to full screen capture
-        try:
-            print(f"Failed to capture window: {window_title or window_id}, falling back to full screen capture")
-            window_image = get_screenshot(1)
-            
-            # Validate the screenshot data
-            if not window_image or len(window_image) == 0:
-                print("Error: Failed to capture screenshot")
-                return {"error": "Failed to capture valid screenshot"}
-                
-            # Verify image data is valid
-            try:
-                test_img = Image.open(io.BytesIO(window_image))
-                test_img.verify()
-            except Exception as e:
-                print(f"Invalid screenshot data: {e}")
-                return {"error": f"Invalid screenshot data: {str(e)}"}
-        except Exception as e:
-            import traceback
-            print(f"Error during fallback screenshot: {e}")
-            traceback.print_exc()
-            return {"error": f"Failed to capture window: {window_title or window_id}"}
     
-    # Analyze the window content
     try:
-        # Validate the window_image data
         if not window_image or len(window_image) == 0:
             print("Error: Empty window image data")
             return {"error": "Empty window image data"}
             
-        # Analyze image content
-        analysis_results = analyze_image(window_image)
+        # Get window image description
+        image_analysis = caption_image(window_image)
         
-        # Check if analysis failed
-        if "error" in analysis_results:
-            print(f"Analysis error: {analysis_results.get('error')}")
-            # Return partial results with the error
-            return {
-                "caption": analysis_results.get("caption", ""),
-                "error": analysis_results.get("error", "Unknown analysis error"),
-                "window_info": target_window
-            }
-        
-        # Detect UI elements - using the new enhanced button detection
-        ui_buttons = cv_find_all_buttons(window_image)
-        ui_checkboxes = cv_find_checkboxes(window_image)
-        
-        # Detect and analyze image regions
-        ui_regions = cv_detect_and_analyze_regions(window_image)
-        
-        # Combine results
         result = {
-            "caption": analysis_results.get("caption", ""),
-            "buttons": ui_buttons,  # This now contains our enhanced button detection
-            "checkboxes": ui_checkboxes,
-            "ui_regions": ui_regions,
-            "window_info": target_window
+            "caption": image_analysis.get("caption", ""),
         }
         
         return result
@@ -995,6 +1336,345 @@ def analyze_window(window_title: str = None, window_id: str = None) -> Dict[str,
         print(f"Error analyzing window content: {e}")
         traceback.print_exc()
         return {"error": f"Error analyzing window content: {str(e)}"}
+
+def extract_text_from_window(image_data: bytes) -> List[Dict[str, Any]]:
+    """
+    Extract text from a window image with high-quality OCR optimization for gaming UIs.
+    
+    Args:
+        image_data: Raw image data in bytes
+        
+    Returns:
+        List of dictionaries containing text and position information
+    """
+    try:
+        print("Extracting text from window...")
+        
+        if not image_data:
+            print("Error: No image data provided")
+            return []
+            
+        # Convert bytes to OpenCV image
+        nparr = np.frombuffer(image_data, np.uint8)
+        img = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
+        
+        if img is None:
+            print("Error: Failed to decode image data")
+            return []
+            
+        # Create a copy of the original image
+        original_img = img.copy()
+        height, width = img.shape[:2]
+        
+        # Apply multiple preprocessing techniques for optimal OCR
+        preprocessed_images = []
+        
+        # 1. Original image
+        preprocessed_images.append(("original", original_img))
+        
+        # 2. Grayscale
+        gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+        preprocessed_images.append(("gray", gray))
+        
+        # 3. High contrast enhancement
+        contrast_img = cv2.convertScaleAbs(img, alpha=1.5, beta=0)
+        preprocessed_images.append(("contrast", contrast_img))
+        
+        # 4. Binary threshold on grayscale
+        _, binary = cv2.threshold(gray, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+        preprocessed_images.append(("binary", binary))
+        
+        # 5. Enhanced for white text on dark background (common in games)
+        _, white_text = cv2.threshold(gray, 180, 255, cv2.THRESH_BINARY)
+        preprocessed_images.append(("white_text", white_text))
+        
+        # Store all text detections
+        all_text = []
+        
+        # Different PSM modes for different text layouts
+        psm_modes = [
+            "--psm 6",  # Assume a single uniform block of text
+            "--psm 11",  # Sparse text
+            "--psm 12",  # Sparse text with OSD
+            "--psm 3",   # Fully automatic page segmentation (good for paragraphs)
+            "--psm 4"    # Assume a single column of text of variable sizes
+        ]
+        
+        # Extract text from each preprocessed image with different PSM modes
+        for name, processed_img in preprocessed_images:
+            for psm_mode in psm_modes:
+                data = pytesseract.image_to_data(processed_img, config=f"{psm_mode} --oem 1", 
+                                               output_type=pytesseract.Output.DICT)
+                
+                for i, text in enumerate(data["text"]):
+                    if not text or len(text.strip()) < 4:  # CHANGED: Increased minimum character requirement from 1 to 4
+                        continue
+                        
+                    confidence = float(data["conf"][i])
+                    
+                    # Lower confidence threshold for longer strings
+                    min_confidence = 55 if len(text.strip()) < 10 else 35
+                    
+                    # Filter low-confidence results
+                    if confidence < min_confidence:
+                        continue
+                        
+                    x, y, w, h = data["left"][i], data["top"][i], data["width"][i], data["height"][i]
+                    
+                    # Adjust filter for very small regions - lower requirements for longer text
+                    min_width = 5 if len(text.strip()) > 10 else 10
+                    min_height = 5 if len(text.strip()) > 10 else 10
+                    
+                    if w < min_width or h < min_height:
+                        continue
+                        
+                    # Check if this text could be a button label
+                    is_potential_button = False
+                    text_lower = text.lower().strip()
+                    
+                    # Common button text detection
+                    button_keywords = ["play", "start", "options", "quit", "exit", "settings", 
+                                      "ok", "cancel", "yes", "no", "continue", "back", "next",
+                                      "single player", "multiplayer", "menu", "create"]
+                                      
+                    # IMPROVED BUTTON TEXT DETECTION: More selective criteria
+                    # Only mark as a button if it exactly matches a button keyword
+                    # or if it has specific button-like characteristics
+                    if text_lower in button_keywords:
+                        is_potential_button = True
+                    # Check for common button patterns like "OK" or "PLAY"
+                    elif (text.isupper() and len(text) <= 8 and confidence > 80):
+                        # Only consider uppercase text as buttons if they're high confidence and match known patterns
+                        if text_lower in ["ok", "play", "yes", "no", "exit", "back", "next"]:
+                            is_potential_button = True
+                    # Don't consider text that's too long to be a button
+                    elif len(text) > 15:
+                        is_potential_button = False
+                    # Short capitalized words might be buttons (like "Play", "Start")
+                    elif (len(text) <= 12 and text[0].isupper() and confidence > 75 and
+                          any(keyword in text_lower for keyword in button_keywords)):
+                        is_potential_button = True
+                    
+                    text_info = {
+                        "text": text.strip(),
+                        "position": {
+                            "x": x,
+                            "y": y,
+                            "width": w,
+                            "height": h,
+                            "center_x": x + w // 2,
+                            "center_y": y + h // 2
+                        },
+                        "confidence": confidence,
+                        "method": f"{name}_{psm_mode.replace('--psm ', '')}",  # Simplified method name
+                        "is_potential_button": is_potential_button
+                    }
+                    all_text.append(text_info)
+                    print(f"Found text '{text}' at ({x}, {y}, {w}, {h}) with confidence {confidence}")
+        
+        # Additional step: try to detect larger text blocks using paragraph mode
+        for name, processed_img in [("original", original_img), ("binary", binary)]:
+            # Use PSM 3 (fully automatic page segmentation) to detect paragraphs
+            paragraph_text = pytesseract.image_to_string(processed_img, config="--psm 3 --oem 1")
+            
+            if paragraph_text and len(paragraph_text.strip()) > 15:  # Only consider substantial paragraphs
+                # Get rough bounding box for the paragraph (using the entire image is a fallback)
+                paragraph_info = {
+                    "text": paragraph_text.strip(),
+                    "position": {
+                        "x": 0,
+                        "y": 0,
+                        "width": width,
+                        "height": height,
+                        "center_x": width // 2,
+                        "center_y": height // 2
+                    },
+                    "confidence": 60,  # Moderate confidence for paragraph detection
+                    "method": f"{name}_paragraph_mode",
+                    "is_potential_button": False
+                }
+                all_text.append(paragraph_info)
+                print(f"Found paragraph: '{paragraph_text[:50]}...' (length: {len(paragraph_text)})")
+        
+        # Filter duplicates
+        filtered_text = []
+        for text_item in all_text:
+            x1 = text_item["position"]["x"]
+            y1 = text_item["position"]["y"]
+            w1 = text_item["position"]["width"]
+            h1 = text_item["position"]["height"]
+            center1 = (x1 + w1//2, y1 + h1//2)
+            text1 = text_item["text"].lower()
+            
+            # Check if this text is too close to existing filtered text
+            is_duplicate = False
+            for filtered in filtered_text[:]:  # Use a copy to allow modification during iteration
+                x2 = filtered["position"]["x"]
+                y2 = filtered["position"]["y"]
+                w2 = filtered["position"]["width"]
+                h2 = filtered["position"]["height"]
+                center2 = (x2 + w2//2, y2 + h2//2)
+                text2 = filtered["text"].lower()
+                
+                # Calculate distance between centers
+                distance = ((center1[0] - center2[0])**2 + (center1[1] - center2[1])**2)**0.5
+                
+                # Check for text similarity
+                if text1 in text2 or text2 in text1:
+                    # If one text is contained in the other, it's likely a duplicate or substring
+                    if distance < max(w1, h1, w2, h2) * 0.7:  # Increased overlap threshold
+                        is_duplicate = True
+                        # Keep the longer text with higher confidence
+                        if len(text1) > len(text2) or (len(text1) == len(text2) and text_item["confidence"] > filtered["confidence"]):
+                            filtered_text.remove(filtered)
+                            filtered_text.append(text_item)
+                        break
+                # If centers are close, consider it a duplicate
+                elif distance < max(w1, h1, w2, h2) * 0.5:
+                    is_duplicate = True
+                    # Keep the detection with higher confidence
+                    if text_item["confidence"] > filtered["confidence"]:
+                        filtered_text.remove(filtered)
+                        filtered_text.append(text_item)
+                    break
+            
+            if not is_duplicate:
+                filtered_text.append(text_item)
+        
+        print(f"Found {len(filtered_text)} unique text elements")
+        return filtered_text
+    except Exception as e:
+        import traceback
+        print(f"Error extracting text from window: {str(e)}")
+        traceback.print_exc()
+        return []
+
+def filter_button_candidates(buttons: List[Dict[str, Any]], extracted_text: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """
+    Filter button candidates to reduce false positives, using extracted text for validation.
+    
+    Args:
+        buttons: List of button candidates from cv_find_all_buttons
+        extracted_text: List of text elements from extract_text_from_window
+        
+    Returns:
+        Filtered list of buttons
+    """
+    try:
+        if not buttons:
+            return []
+            
+        print(f"Filtering {len(buttons)} button candidates...")
+        
+        # Create a mapping of extracted text positions
+        text_positions = []
+        button_keywords = ["play", "start", "options", "quit", "exit", "settings", 
+                          "ok", "cancel", "yes", "no", "continue", "back", "next",
+                          "single player", "multiplayer", "menu", "create"]
+                          
+        for text_item in extracted_text:
+            if text_item["is_potential_button"]:
+                pos = text_item["position"]
+                text_positions.append({
+                    "text": text_item["text"],
+                    "x": pos["x"],
+                    "y": pos["y"],
+                    "width": pos["width"],
+                    "height": pos["height"],
+                    "confidence": text_item.get("confidence", 0)
+                })
+        
+        # Filter buttons
+        filtered_buttons = []
+        
+        for button in buttons:
+            # Get button position
+            pos = button["position"]
+            x, y, w, h = pos["x"], pos["y"], pos["width"], pos["height"]
+            button_text = button["text"]
+            
+            # Skip buttons with unreasonable dimensions
+            aspect_ratio = w / h if h > 0 else 0
+            if aspect_ratio > 8.0 or aspect_ratio < 1.0:
+                print(f"Skipping button with unreasonable aspect ratio: {aspect_ratio}")
+                continue
+                
+            # CHANGED: Completely reject ALL generic "Button" text without any exceptions
+            if button_text == "Button":
+                print(f"Skipping generic 'Button' text completely")
+                continue
+            
+            # Additional validation for buttons with specific text
+            if button_text.upper() == "PLAY" or button_text.lower() == "play":
+                # We need extra validation for "PLAY" text to avoid false positives
+                # Check if this text has confirmation from extracted_text
+                confirmed_by_text = False
+                for text_pos in text_positions:
+                    tx = text_pos["x"]
+                    ty = text_pos["y"]
+                    tw = text_pos["width"]
+                    th = text_pos["height"]
+                    
+                    # Calculate overlap
+                    overlap_x = max(0, min(x + w, tx + tw) - max(x, tx))
+                    overlap_y = max(0, min(y + h, ty + th) - max(y, ty))
+                    
+                    if overlap_x > 0 and overlap_y > 0:
+                        text_lower = text_pos["text"].lower()
+                        if "play" in text_lower and text_pos.get("confidence", 0) > 75:
+                            confirmed_by_text = True
+                            break
+                
+                # If we can't confirm this "PLAY" text through other means, be very selective
+                if not confirmed_by_text:
+                    # Extract the region to check button-like appearance
+                    import cv2
+                    import numpy as np
+                    
+                    # Get the image data
+                    try:
+                        with mss.mss() as sct:
+                            monitor = sct.monitors[1]  # Use primary monitor
+                            screenshot = sct.grab(monitor)
+                            img_np = np.array(screenshot)
+                            
+                            # Make sure the coordinates are within bounds
+                            if (x >= 0 and y >= 0 and 
+                                x + w <= img_np.shape[1] and 
+                                y + h <= img_np.shape[0]):
+                                
+                                # Extract the button region
+                                roi = img_np[y:y+h, x:x+w]
+                                
+                                # Convert to grayscale
+                                roi_gray = cv2.cvtColor(roi, cv2.COLOR_BGR2GRAY)
+                                
+                                # Check for edges (buttons typically have edges/borders)
+                                edges = cv2.Canny(roi_gray, 50, 150)
+                                edge_density = np.count_nonzero(edges) / (w * h)
+                                
+                                # Check color variance (buttons often have distinct colors)
+                                color_variance = np.std(roi_gray)
+                                
+                                # Only keep if strong visual button indicators are present
+                                if edge_density < 0.1 or color_variance < 15:
+                                    print(f"Rejecting 'PLAY' button without strong visual indicators")
+                                    continue
+                    except Exception as e:
+                        print(f"Error validating PLAY button: {e}")
+                        # Be conservative - if we can't verify, reject it
+                        continue
+            
+            # Accept this button
+            filtered_buttons.append(button)
+        
+        print(f"Filtered to {len(filtered_buttons)} valid buttons")
+        return filtered_buttons
+    except Exception as e:
+        import traceback
+        print(f"Error filtering button candidates: {str(e)}")
+        traceback.print_exc()
+        return buttons  # Return original list if filtering fails
 
 def _capture_window_windows(window_info=None, window_title=None, window_id=None) -> Optional[bytes]:
     """Capture a window on Windows"""
@@ -1194,13 +1874,15 @@ def _capture_window_macos(window_info=None, window_title=None, window_id=None) -
 def _capture_window_linux(window_info=None, window_title=None, window_id=None) -> Optional[bytes]:
     """Capture a window on Linux"""
     try:
-        # If window_info contains position and size, use that for screenshot
-        if window_info and "position" in window_info and "size" in window_info and isinstance(window_info["position"], dict) and isinstance(window_info["size"], dict):
-            pos = window_info["position"]
-            size = window_info["size"]
+        # 1. First try: If we have window info with position and size, try direct capture
+        if window_info and "position" in window_info and "size" in window_info:
+            pos = window_info.get("position", {})
+            size = window_info.get("size", {})
             
-            # If position is available and valid
-            if pos.get("x", 0) > 0 or pos.get("y", 0) > 0:
+            # Ensure we have numeric values for position and size
+            if (isinstance(pos, dict) and isinstance(size, dict) and
+                all(k in pos and isinstance(pos[k], int) for k in ["x", "y"]) and
+                all(k in size and isinstance(size[k], int) for k in ["width", "height"])):
                 try:
                     with mss.mss() as sct:
                         monitor = {
@@ -1213,107 +1895,119 @@ def _capture_window_linux(window_info=None, window_title=None, window_id=None) -
                         img = Image.frombytes("RGB", screenshot.size, screenshot.rgb)
                         
                         buf = io.BytesIO()
-                        img.save(buf, format='JPEG')
+                        img.save(buf, format='PNG')  # Use PNG for better quality
                         img_data = buf.getvalue()
                         
                         # Validate the image data
                         try:
                             test_img = Image.open(io.BytesIO(img_data))
                             test_img.verify()  # Verify image data is valid
+                            print("Successfully captured window using mss with position/size")
                             return img_data
                         except Exception as e:
                             print(f"Invalid image data from mss: {e}")
-                            # Continue to alternative methods
                 except Exception as e:
                     print(f"Error using mss for window capture: {e}")
-                    # Continue to alternative methods
         
-        # Try using xwd or import to capture the window
+        # 2. Second try: Use xdotool to activate window then take screenshot
         try:
+            import subprocess
+            
+            # Create a temporary file for the screenshot
             with tempfile.NamedTemporaryFile(suffix='.png', delete=False) as temp_file:
                 temp_path = temp_file.name
-            
-            capture_cmd = None
-            
+                
+            # First, activate the window to bring it to front
             if window_id:
-                # Try xwd with window ID
-                capture_cmd = ['xwd', '-id', str(window_id), '-out', temp_path]
-            elif window_title:
-                # Try to get window ID first using xdotool
+                print(f"Activating window with ID {window_id}")
+                subprocess.run(['xdotool', 'windowactivate', str(window_id)], capture_output=True, check=False)
+                # Short delay to allow window to become active
+                time.sleep(0.5)
+                
+                # Try using xwd to capture the active window
                 try:
-                    win_id_result = subprocess.run(
-                        ['xdotool', 'search', '--name', window_title], 
-                        capture_output=True, text=True
-                    )
+                    subprocess.run(['xwd', '-id', str(window_id), '-out', f"{temp_path}.xwd"], capture_output=True, check=False)
+                    # Convert xwd to PNG
+                    subprocess.run(['convert', f"{temp_path}.xwd", temp_path], capture_output=True, check=False)
                     
-                    if win_id_result.returncode == 0 and win_id_result.stdout.strip():
-                        window_id = win_id_result.stdout.strip().split('\n')[0]
-                        # Now use import to capture the window
-                        capture_cmd = ['import', '-window', window_id, temp_path]
-                    else:
-                        # Activate the window first, then capture
-                        subprocess.run(['xdotool', 'search', '--name', window_title, 'windowactivate'], 
-                                      capture_output=True, text=True)
-                        time.sleep(0.5)  # Allow time for window to activate
-                        capture_cmd = ['import', '-window', 'root', temp_path]
-                except FileNotFoundError:
-                    print("xdotool not found, trying alternative methods")
-                    # Try using scrot instead
-                    capture_cmd = ['scrot', temp_path]
-            else:
-                # Capture active window or full screen
-                capture_cmd = ['scrot', '-u', temp_path]
-            
-            if capture_cmd:
-                try:
-                    result = subprocess.run(capture_cmd, capture_output=True, text=True, timeout=5)
-                    
-                    if result.returncode == 0 and os.path.exists(temp_path) and os.path.getsize(temp_path) > 0:
-                        # Read the captured screenshot
+                    if os.path.exists(temp_path) and os.path.getsize(temp_path) > 100:
                         with open(temp_path, 'rb') as img_file:
                             img_data = img_file.read()
-                        
-                        # Clean up temp file
-                        try:
-                            os.unlink(temp_path)
-                        except:
-                            pass
-                        
-                        # Validate the image data
-                        try:
-                            test_img = Image.open(io.BytesIO(img_data))
-                            test_img.verify()  # Verify image data is valid
-                            return img_data
-                        except Exception as e:
-                            print(f"Invalid image data from command-line tools: {e}")
-                            # Continue to fallback
-                except subprocess.TimeoutExpired:
-                    print("Screenshot command timed out")
+                        # Clean up temp files
+                        os.unlink(temp_path)
+                        if os.path.exists(f"{temp_path}.xwd"):
+                            os.unlink(f"{temp_path}.xwd")
+                        print("Successfully captured window using xwd")
+                        return img_data
                 except Exception as e:
-                    print(f"Error running screenshot command: {e}")
-            
-            # Clean up temp file if it exists
-            if os.path.exists(temp_path):
+                    print(f"Error with xwd: {e}")
+                    
+                # If xwd failed, try import
                 try:
+                    subprocess.run(['import', '-window', str(window_id), temp_path], capture_output=True, check=False)
+                    if os.path.exists(temp_path) and os.path.getsize(temp_path) > 100:
+                        with open(temp_path, 'rb') as img_file:
+                            img_data = img_file.read()
+                        os.unlink(temp_path)
+                        print("Successfully captured window using import")
+                        return img_data
+                except Exception as e:
+                    print(f"Error with import: {e}")
+            
+            # If we get here, try using general window capture approach
+            if window_title:
+                try:
+                    # First get window ID using wmctrl if we don't have it
+                    if not window_id:
+                        wmctrl_output = subprocess.run(['wmctrl', '-l'], capture_output=True, text=True, check=False)
+                        if wmctrl_output.returncode == 0:
+                            for line in wmctrl_output.stdout.split('\n'):
+                                if window_title in line:
+                                    parts = line.split(None, 1)
+                                    if parts:
+                                        window_id = parts[0]
+                                        break
+                    
+                    # If we found window_id, try capturing it
+                    if window_id:
+                        subprocess.run(['xdotool', 'windowactivate', str(window_id)], capture_output=True, check=False)
+                        time.sleep(0.5)
+                        subprocess.run(['import', '-window', str(window_id), temp_path], capture_output=True, check=False)
+                        if os.path.exists(temp_path) and os.path.getsize(temp_path) > 100:
+                            with open(temp_path, 'rb') as img_file:
+                                img_data = img_file.read()
+                            os.unlink(temp_path)
+                            print("Successfully captured window using import with window title")
+                            return img_data
+                except Exception as e:
+                    print(f"Error with window title capture: {e}")
+            
+            # If we get here, try capturing active window
+            try:
+                subprocess.run(['import', '-window', 'root', temp_path], capture_output=True, check=False)
+                if os.path.exists(temp_path) and os.path.getsize(temp_path) > 100:
+                    with open(temp_path, 'rb') as img_file:
+                        img_data = img_file.read()
                     os.unlink(temp_path)
-                except:
-                    pass
+                    print("Captured active window/root")
+                    return img_data
+            except Exception as e:
+                print(f"Error capturing active window: {e}")
+                
+            # Clean up temp file if it exists and we haven't used it yet
+            if os.path.exists(temp_path):
+                os.unlink(temp_path)
         except Exception as e:
+            import traceback
             print(f"Error with command-line screenshot tools: {e}")
+            traceback.print_exc()
         
-        # Fall back to full screen capture if all else fails
+        # 3. Last resort: Fall back to full screen capture
         print("Falling back to full screen capture")
         try:
             img_data = get_screenshot(1)
-            
-            # Validate the fallback image data
-            try:
-                test_img = Image.open(io.BytesIO(img_data))
-                test_img.verify()  # Verify image data is valid
-                return img_data
-            except Exception as e:
-                print(f"Invalid image data from fallback screenshot: {e}")
-                return None
+            print("Successfully captured full screen as fallback")
+            return img_data
         except Exception as e:
             print(f"Error during fallback screenshot: {e}")
             return None
@@ -1321,6 +2015,417 @@ def _capture_window_linux(window_info=None, window_title=None, window_id=None) -
         import traceback
         print(f"Error capturing window on Linux: {e}")
         traceback.print_exc()
-        # Return None and let the caller handle the fallback
         return None
+
+def extract_gaming_ui_text(image_data: bytes) -> List[Dict[str, Any]]:
+    """
+    Specialized function for extracting text from gaming interfaces with stylized fonts and high contrast.
+    
+    This function is optimized for text commonly found in gaming UIs including:
+    - Stylized fonts with unusual shapes
+    - High contrast text (white on dark or dark on light backgrounds)
+    - Button labels and menu options
+    - Uppercase text that's common in game UI elements
+    - Longer text such as instructions, descriptions, and dialogue
+    
+    Args:
+        image_data: Raw image data in bytes
+        
+    Returns:
+        List of dictionaries containing text and position information
+    """
+    try:
+        print("Extracting gaming UI text...")
+        
+        if not image_data:
+            print("Error: No image data provided")
+            return []
+            
+        # Convert bytes to OpenCV image
+        nparr = np.frombuffer(image_data, np.uint8)
+        img = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
+        
+        if img is None:
+            print("Error: Failed to decode image data")
+            return []
+            
+        # Create a copy of the original image
+        original_img = img.copy()
+        height, width = img.shape[:2]
+        
+        # Store all text detections
+        all_text = []
+        
+        # Convert to grayscale
+        gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+        
+        # 1. SPECIALIZED APPROACH FOR WHITE TEXT ON DARK BACKGROUNDS (common in games)
+        # ------------------------------------------------------
+        # Create binary image optimized for white text
+        _, white_text_mask = cv2.threshold(gray, 180, 255, cv2.THRESH_BINARY)
+        
+        # Dilate to connect nearby text components
+        kernel = np.ones((2,2), np.uint8)
+        dilated_white = cv2.dilate(white_text_mask, kernel, iterations=1)
+        
+        # Find contours around potential text areas
+        white_contours, _ = cv2.findContours(dilated_white, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+        
+        # Extract text from white regions
+        for cnt in white_contours:
+            x, y, w, h = cv2.boundingRect(cnt)
+            
+            # Filter out regions that are too small, but use more permissive thresholds
+            if w < 10 or h < 8:
+                continue
+                
+            # Also filter out regions that are too large, but allow for larger text blocks
+            # Allow up to 80% of width for things like paragraph text in dialogue boxes
+            if w > width * 0.8 or h > height * 0.4:
+                continue
+                
+            # Extract ROI
+            roi = white_text_mask[y:y+h, x:x+w]
+            
+            # Calculate white pixel density (white text should have reasonable density)
+            white_pixel_count = np.sum(roi > 0)
+            white_pixel_density = white_pixel_count / (w * h)
+            
+            # Skip regions with too few or too many white pixels, adjusted for larger text areas
+            min_density = 0.05 if w > 100 else 0.1  # Lower density threshold for larger areas
+            max_density = 0.95 if w > 100 else 0.9  # Higher density threshold for larger areas
+            
+            if white_pixel_density < min_density or white_pixel_density > max_density:
+                continue
+                
+            # Calculate edges in the region to check for text-like patterns
+            edges = cv2.Canny(roi, 100, 200)
+            edge_pixel_count = np.sum(edges > 0)
+            edge_density = edge_pixel_count / (w * h)
+            
+            # Skip regions without enough edges (text has edges), with adjustment for size
+            min_edge_density = 0.03 if w > 100 else 0.05  # Lower edge density requirement for larger blocks
+            
+            if edge_density < min_edge_density:
+                continue
+                
+            # Resize for better OCR
+            enlarged_roi = cv2.resize(roi, (w*3, h*3), interpolation=cv2.INTER_CUBIC)
+            
+            # Choose PSM mode based on region size
+            if w > 150:  # Likely a paragraph or multi-line text
+                ocr_config = '--psm 3 --oem 1'  # Automatic page segmentation
+            else:
+                ocr_config = '--psm 7 --oem 1'  # Single line of text
+                
+            text = pytesseract.image_to_string(enlarged_roi, config=ocr_config).strip()
+            
+            # Skip empty results, but allow shorter text for buttons
+            if not text:
+                continue
+                
+            # Different threshold based on region size
+            if len(text) < 4 and w < 50:  # CHANGED: Increased from 2 to 4 chars minimum for small regions
+                continue
+                
+            # Calculate if this is likely a button label
+            is_button = False
+            text_lower = text.lower()
+            button_keywords = ["play", "start", "options", "quit", "exit", "settings", 
+                             "ok", "cancel", "yes", "no", "continue", "back", "next", 
+                             "single player", "multiplayer", "menu", "create"]
+                             
+            if (text_lower in button_keywords or 
+                any(keyword in text_lower for keyword in button_keywords) or
+                text.isupper() or
+                (len(text) <= 12 and text[0].isupper())):
+                is_button = True
+            
+            # Add to results
+            text_info = {
+                "text": text,
+                "position": {
+                    "x": x,
+                    "y": y,
+                    "width": w,
+                    "height": h,
+                    "center_x": x + w // 2,
+                    "center_y": y + h // 2
+                },
+                "confidence": 85,  # Higher confidence for white text in games
+                "method": "white_text_extraction",
+                "is_potential_button": is_button
+            }
+            all_text.append(text_info)
+            print(f"Found white text '{text}' at ({x}, {y}, {w}, {h})")
+        
+        # 2. CONTRAST ENHANCEMENT APPROACH FOR HARD-TO-READ TEXT
+        # ------------------------------------------------------
+        # Create high contrast version of the image
+        contrast_enhanced = cv2.convertScaleAbs(img, alpha=2.0, beta=0)
+        contrast_gray = cv2.cvtColor(contrast_enhanced, cv2.COLOR_BGR2GRAY)
+        
+        # Create an adaptive threshold
+        contrast_binary = cv2.adaptiveThreshold(
+            contrast_gray, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C, cv2.THRESH_BINARY, 11, 2)
+            
+        # Try both sparse text and paragraph modes for contrast-enhanced image
+        psm_modes = [
+            ('--psm 11 --oem 1', 'sparse_text'),  # Sparse text detection
+            ('--psm 3 --oem 1', 'paragraph'),     # Full page text detection (for longer texts)
+            ('--psm 4 --oem 1', 'column_text')    # Single column detection (for dialogue boxes)
+        ]
+        
+        for ocr_config, mode_name in psm_modes:
+            if mode_name == 'paragraph' or mode_name == 'column_text':
+                # For paragraph mode, extract full string first
+                full_text = pytesseract.image_to_string(contrast_binary, config=ocr_config).strip()
+                
+                if full_text and len(full_text) > 15:  # Only consider substantial paragraphs
+                    # Create a rough paragraph entry for the full text
+                    paragraph_info = {
+                        "text": full_text,
+                        "position": {
+                            "x": 0,
+                            "y": 0,
+                            "width": width,
+                            "height": height,
+                            "center_x": width // 2,
+                            "center_y": height // 2
+                        },
+                        "confidence": 75,  # Decent confidence for paragraph in gaming UIs
+                        "method": f"contrast_{mode_name}",
+                        "is_potential_button": False
+                    }
+                    all_text.append(paragraph_info)
+                    print(f"Found paragraph text: '{full_text[:50]}...' (length: {len(full_text)})")
+            else:
+                # For sparse text mode, use image_to_data to get detailed info
+                contrast_data = pytesseract.image_to_data(
+                    contrast_binary, config=ocr_config, output_type=pytesseract.Output.DICT)
+                    
+                for i, text in enumerate(contrast_data["text"]):
+                    if not text:
+                        continue
+                        
+                    # Different minimum length based on whether it might be a button/UI element
+                    if len(text.strip()) < 4:  # CHANGED: Increased from 1 to 4 chars minimum
+                        continue
+                        
+                    confidence = float(contrast_data["conf"][i])
+                    # Lower confidence threshold for longer texts
+                    min_confidence = 60 if len(text.strip()) < 10 else 40
+                    
+                    if confidence < min_confidence:
+                        continue
+                        
+                    x, y, w, h = (contrast_data["left"][i], contrast_data["top"][i],
+                                contrast_data["width"][i], contrast_data["height"][i])
+                                
+                    # Skip very small regions with more permissive thresholds for longer text
+                    min_width = 5 if len(text.strip()) > 10 else 10
+                    min_height = 5 if len(text.strip()) > 10 else 10
+                    
+                    if w < min_width or h < min_height:
+                        continue
+                        
+                    # Check if this is likely a button/menu label
+                    is_button = False
+                    text_lower = text.lower()
+                    if (text_lower in button_keywords or 
+                        any(keyword in text_lower for keyword in button_keywords) or
+                        text.isupper() or
+                        (len(text) <= 12 and text[0].isupper())):
+                        is_button = True
+                        
+                    text_info = {
+                        "text": text.strip(),
+                        "position": {
+                            "x": x,
+                            "y": y,
+                            "width": w,
+                            "height": h,
+                            "center_x": x + w // 2,
+                            "center_y": y + h // 2
+                        },
+                        "confidence": confidence,
+                        "method": f"contrast_{mode_name}",
+                        "is_potential_button": is_button
+                    }
+                    all_text.append(text_info)
+                    print(f"Found contrast-enhanced text '{text}' at ({x}, {y}, {w}, {h}) with confidence {confidence}")
+        
+        # 3. ADVANCED TEXT BLOCK DETECTION (for longer text)
+        # ------------------------------------------------------
+        # Create MSER detector for text region detection (good for paragraphs)
+        mser = cv2.MSER_create()
+        
+        # Convert to grayscale if not already
+        if len(img.shape) > 2:
+            gray_img = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+        else:
+            gray_img = img.copy()
+            
+        # Detect regions
+        regions, _ = mser.detectRegions(gray_img)
+        
+        # Filter and merge regions to detect text blocks
+        if regions:
+            # Convert regions to bounding boxes
+            boxes = []
+            for region in regions:
+                x, y, w, h = cv2.boundingRect(region.reshape(-1, 1, 2))
+                # Filter very small regions
+                if w > 10 and h > 10:
+                    boxes.append((x, y, w, h))
+                    
+            # Merge overlapping boxes to form text blocks
+            merged_boxes = []
+            while boxes:
+                current_box = boxes.pop(0)
+                
+                # Check if current box overlaps with any merged box
+                overlaps = False
+                for i, merged_box in enumerate(merged_boxes):
+                    if _boxes_overlap(current_box, merged_box):
+                        # Merge the boxes
+                        merged_boxes[i] = _merge_boxes(current_box, merged_box)
+                        overlaps = True
+                        break
+                        
+                if not overlaps:
+                    merged_boxes.append(current_box)
+            
+            # Process each merged box as a potential text block
+            for x, y, w, h in merged_boxes:
+                # Skip boxes that are too small or too large
+                if w < 30 or h < 15 or w > width * 0.9 or h > height * 0.5:
+                    continue
+                    
+                # Extract the region
+                roi = gray_img[y:y+h, x:x+w]
+                
+                # Apply OCR with settings suitable for text blocks
+                ocr_config = '--psm 3 --oem 1'  # Automatic page segmentation
+                text = pytesseract.image_to_string(roi, config=ocr_config).strip()
+                
+                # Skip empty or very short results
+                if not text or len(text) < 10:  # Text blocks should have reasonable length
+                    continue
+                    
+                # Add to results
+                text_info = {
+                    "text": text,
+                    "position": {
+                        "x": x,
+                        "y": y,
+                        "width": w,
+                        "height": h,
+                        "center_x": x + w // 2,
+                        "center_y": y + h // 2
+                    },
+                    "confidence": 70,  # Moderate confidence for MSER text block detection
+                    "method": "mser_text_block",
+                    "is_potential_button": False
+                }
+                all_text.append(text_info)
+                print(f"Found text block: '{text[:50]}...' (length: {len(text)})")
+        
+        # Filter out duplicates and keep better quality detections
+        filtered_text = []
+        for text_item in all_text:
+            x1 = text_item["position"]["x"]
+            y1 = text_item["position"]["y"]
+            w1 = text_item["position"]["width"]
+            h1 = text_item["position"]["height"]
+            center1 = (x1 + w1//2, y1 + h1//2)
+            text1 = text_item["text"].lower()
+            
+            is_duplicate = False
+            for filtered in filtered_text[:]:  # Use a copy to allow modification during iteration
+                x2 = filtered["position"]["x"]
+                y2 = filtered["position"]["y"]
+                w2 = filtered["position"]["width"]
+                h2 = filtered["position"]["height"]
+                center2 = (x2 + w2//2, y2 + h2//2)
+                text2 = filtered["text"].lower()
+                
+                # Check for text similarity
+                if text1 in text2 or text2 in text1:
+                    # If one text is contained in the other, it's likely a duplicate or substring
+                    if distance_between_boxes((x1, y1, w1, h1), (x2, y2, w2, h2)) < max(w1, h1, w2, h2) * 0.7:
+                        is_duplicate = True
+                        # Keep the longer text with higher confidence
+                        if len(text1) > len(text2) or (len(text1) == len(text2) and text_item["confidence"] > filtered["confidence"]):
+                            filtered_text.remove(filtered)
+                            filtered_text.append(text_item)
+                        break
+                # If boxes significantly overlap, consider it a duplicate
+                elif _boxes_overlap((x1, y1, w1, h1), (x2, y2, w2, h2)):
+                    is_duplicate = True
+                    # Keep the detection with higher confidence or longer text
+                    if text_item["confidence"] > filtered["confidence"] or len(text1) > len(text2):
+                        filtered_text.remove(filtered)
+                        filtered_text.append(text_item)
+                    break
+            
+            if not is_duplicate:
+                filtered_text.append(text_item)
+                
+        print(f"Found {len(filtered_text)} unique text elements in gaming UI")
+        return filtered_text
+    except Exception as e:
+        import traceback
+        print(f"Error extracting gaming UI text: {str(e)}")
+        traceback.print_exc()
+        return []
+
+def _boxes_overlap(box1, box2):
+    """Check if two boxes overlap"""
+    x1, y1, w1, h1 = box1
+    x2, y2, w2, h2 = box2
+    
+    # Calculate the coordinates of the corners
+    left1, right1 = x1, x1 + w1
+    top1, bottom1 = y1, y1 + h1
+    left2, right2 = x2, x2 + w2
+    top2, bottom2 = y2, y2 + h2
+    
+    # Check if boxes overlap
+    return not (right1 < left2 or left1 > right2 or bottom1 < top2 or top1 > bottom2)
+
+def _merge_boxes(box1, box2):
+    """Merge two overlapping boxes"""
+    x1, y1, w1, h1 = box1
+    x2, y2, w2, h2 = box2
+    
+    # Calculate the coordinates of the corners
+    left1, right1 = x1, x1 + w1
+    top1, bottom1 = y1, y1 + h1
+    left2, right2 = x2, x2 + w2
+    top2, bottom2 = y2, y2 + h2
+    
+    # Calculate the coordinates of the merged box
+    left = min(left1, left2)
+    top = min(top1, top2)
+    right = max(right1, right2)
+    bottom = max(bottom1, bottom2)
+    
+    # Convert back to x, y, w, h format
+    x = left
+    y = top
+    w = right - left
+    h = bottom - top
+    
+    return (x, y, w, h)
+
+def distance_between_boxes(box1, box2):
+    """Calculate distance between centers of two boxes"""
+    x1, y1, w1, h1 = box1
+    x2, y2, w2, h2 = box2
+    
+    center1 = (x1 + w1//2, y1 + h1//2)
+    center2 = (x2 + w2//2, y2 + h2//2)
+    
+    return ((center1[0] - center2[0])**2 + (center1[1] - center2[1])**2)**0.5
  

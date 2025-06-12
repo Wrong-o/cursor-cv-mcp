@@ -400,3 +400,92 @@ def click_in_minecraft_launcher(rel_x=None, rel_y=None, button="left", clicks=1)
         import traceback
         traceback.print_exc()
         return False
+
+def click_window_element(window_info, element_position, button="left", clicks=1):
+    """
+    Click on a UI element detected in a window.
+    
+    This function takes the window info and element position from analyze_window results
+    and calculates the correct absolute screen coordinates before clicking.
+    
+    Args:
+        window_info: The window_info object from analyze_window results
+        element_position: The position object of the UI element (x, y, width, height, center_x, center_y)
+        button: Mouse button ('left', 'right', 'middle')
+        clicks: Number of clicks
+    
+    Returns:
+        Success status
+    """
+    try:
+        # Extract window position
+        if not window_info or not isinstance(window_info, dict):
+            print(f"Error: Invalid window_info: {window_info}")
+            return False
+            
+        if "position" not in window_info or not isinstance(window_info["position"], dict):
+            print(f"Error: Window info missing position data: {window_info}")
+            return False
+            
+        window_x = window_info["position"].get("x", 0)
+        window_y = window_info["position"].get("y", 0)
+        
+        # Extract element position
+        if not element_position or not isinstance(element_position, dict):
+            print(f"Error: Invalid element position: {element_position}")
+            return False
+            
+        # Prefer to use center_x and center_y if available
+        if "center_x" in element_position and "center_y" in element_position:
+            rel_x = element_position["center_x"]
+            rel_y = element_position["center_y"]
+        else:
+            # Otherwise calculate from x, y, width, height
+            rel_x = element_position.get("x", 0) + element_position.get("width", 0) // 2
+            rel_y = element_position.get("y", 0) + element_position.get("height", 0) // 2
+        
+        # Calculate absolute screen coordinates
+        abs_x = window_x + rel_x
+        abs_y = window_y + rel_y
+        
+        print(f"Element relative position: ({rel_x}, {rel_y})")
+        print(f"Window position: ({window_x}, {window_y})")
+        print(f"Calculated absolute position: ({abs_x}, {abs_y})")
+        
+        # Determine which monitor this window is on
+        monitors_info = get_available_monitors()
+        window_monitor = None
+        
+        for mon in monitors_info["monitors"]:
+            mon_right = mon["left"] + mon["width"]
+            mon_bottom = mon["top"] + mon["height"]
+            if (mon["left"] <= window_x < mon_right and 
+                mon["top"] <= window_y < mon_bottom):
+                window_monitor = mon["id"]
+                break
+        
+        if window_monitor is None:
+            print(f"Could not determine which monitor window is on")
+            window_monitor = monitors_info.get("primary", 1)
+        
+        print(f"Window is on monitor {window_monitor}")
+        
+        # First, activate the window to bring it to front
+        import subprocess
+        try:
+            if "id" in window_info and window_info["id"]:
+                activate_cmd = ["xdotool", "windowactivate", "--sync", str(window_info["id"])]
+                subprocess.run(activate_cmd, check=True)
+                time.sleep(0.5)  # Give the window time to activate
+        except Exception as e:
+            print(f"Warning: Could not activate window: {e}")
+            # Continue anyway
+        
+        # Click at the absolute position on the correct monitor
+        return mouse_click(abs_x, abs_y, button, clicks, window_monitor)
+        
+    except Exception as e:
+        print(f"Error clicking window element: {e}")
+        import traceback
+        traceback.print_exc()
+        return False

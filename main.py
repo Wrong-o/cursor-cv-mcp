@@ -1,8 +1,8 @@
 import base64
 from fastapi import FastAPI, Body, HTTPException
 from fastapi_mcp import FastApiMCP
-from cv_and_screenshots import get_available_monitors, get_screenshot, analyze_image, get_screenshot_with_analysis, find_text_in_image as cv_find_text_in_image, analyze_window as cv_analyze_window
-from mouse_control import mouse_move as move_mouse_function, mouse_click as click_mouse_function
+from cv_and_screenshots import get_available_monitors, get_screenshot, caption_window, get_screenshot_with_analysis, find_text_in_image as cv_find_text_in_image 
+from mouse_control import mouse_move as move_mouse_function, mouse_click as click_mouse_function, click_window_element
 from keyboard_control import keyboard_type_text, keyboard_press_keys, keyboard_layout_info
 from window_control import get_open_windows, activate_window, launch_application
 from file_operations import open_downloads_folder, get_folder_contents
@@ -15,6 +15,7 @@ from tts_service import tts_service
 from os_info import get_os_info
 import platform
 import subprocess
+import time
 
 class PressKeysInput(BaseModel):
     """Input for the press_keys endpoint"""
@@ -37,14 +38,22 @@ async def hello():
 
 @app.get("/system_info", operation_id="system_info")
 async def system_info():
-    """Get information about the system, including monitors, operating system, and keyboard layout"""
+    """MUST BE CALLED BEFORE ANY OTHER ENDPOINT.Get information about the system, including monitors, operating system, and keyboard layout"""
     monitors = get_available_monitors()
     return {"monitors": monitors, "os": get_os_info(), "keyboard_layout": keyboard_layout_info(), "keyboard_layout_name": keyboard_layout_info().name}
 
 @app.get("/screenshot_with_analysis", operation_id="screenshot_with_analysis")
 async def screenshot_with_analysis(monitor_id: int, target_string: Optional[str] = None):
-    """Analyze screenshot of monitor and find buttons
-    target_string is an optional parameter to find a specific text in the image and return the position of the text"""
+    """Screenshots entire monitor.
+    This function should not be used if only a certain window is of interest, use analyze_window instead.
+    ALWAYS MAKE SURE THAT THE RIGHT WINDOW IS VISIBLE BY USING LIST WINDOWS AND ACTIVATE WINDOW.
+    Args:
+        monitor_id: ID of the monitor to capture and analyze
+        target_string: Optional string to find in the image
+
+    Returns:
+        Dictionary containing analysis of the screenshot, buttons, checkboxes, text matches, and UI regions
+    """
     try:
         # Print debug info
         print(f"Requested screenshot with monitor_id={monitor_id}, target_string={target_string}")
@@ -98,10 +107,30 @@ async def screenshot_with_analysis(monitor_id: int, target_string: Optional[str]
                     # Remove the binary image data
                     del processed_region["image_data"]
                 processed_regions.append(processed_region)
+                
+        # ADDED: Debug output for buttons
+        print(f"BEFORE FILTERING: Found {len(ui_buttons) if ui_buttons else 0} buttons")
+        if ui_buttons:
+            for i, button in enumerate(ui_buttons):
+                print(f"  Button {i+1}: text='{button.get('text', 'No text')}', position={button.get('position', {})}")
+        
+        # Filter out buttons with text "Button"
+        filtered_buttons = []
+        if ui_buttons:
+            for button in ui_buttons:
+                button_text = button.get("text", "")
+                if button_text != "Button":
+                    filtered_buttons.append(button)
+                else:
+                    print(f"  FILTERED OUT: Button with generic 'Button' text at position {button.get('position', {})}")
+            
+            print(f"AFTER FILTERING: Kept {len(filtered_buttons)} buttons, removed {len(ui_buttons) - len(filtered_buttons)}")
+        else:
+            filtered_buttons = []
 
         return {
             "analysis": analysis,
-            "buttons": ui_buttons,
+            "buttons": filtered_buttons,
             "checkboxes": formatted_checkboxes,
             "text_matches": text_matches,
             "ui_regions": processed_regions
@@ -152,209 +181,6 @@ async def mouse_click(x: int, y: int, button: str = "left", clicks: int = 1, mon
             "tip": "Make sure to specify a valid monitor ID and coordinates within that monitor's bounds."
         }
     return {"success": result}
-
-@app.get("/click_ui_element", operation_id="click_ui_element")
-async def click_ui_element(
-    monitor_id: int, 
-    element_type: str, 
-    search_text: Optional[str] = None,
-    index: int = 0, 
-    button: str = "left", 
-    clicks: int = 1
-):
-    """Click on a UI element identified by type and optional text.
-
-    Args:
-        monitor_id: ID of the monitor to capture and click on
-        element_type: Type of element to click ('text', 'button', 'checkbox', 'region')
-        search_text: Text to search for (if element_type is 'text' or 'region')
-        index: Index of the element to click if multiple matches are found
-        button: Mouse button to click with ('left', 'right', 'middle')
-        clicks: Number of clicks
-        
-    Returns:
-        Success status and information about the clicked element
-    """
-    try:
-        # Validate monitor_id first
-        monitors_info = get_available_monitors()
-        available_monitors = [mon["id"] for mon in monitors_info.get("monitors", [])]
-        primary_monitor = monitors_info.get("primary", None)
-        
-        if monitor_id not in available_monitors:
-            return {
-                "success": False,
-                "error": f"Invalid monitor ID: {monitor_id}",
-                "available_monitors": available_monitors,
-                "primary_monitor": primary_monitor,
-                "tip": "Please specify a valid monitor ID from the available monitors list."
-            }
-        
-        # Get screenshot with analysis
-        screenshot_data, analysis, ui_buttons, ui_checkboxes, ui_regions = get_screenshot_with_analysis(monitor_id)
-        if screenshot_data is None:
-            return {
-                "success": False, 
-                "error": "Failed to capture screenshot",
-                "monitor_info": {
-                    "requested_monitor": monitor_id,
-                    "available_monitors": available_monitors,
-                    "primary_monitor": primary_monitor
-                }
-            }
-            
-        # Default values
-        element_position = None
-        element_info = None
-        
-        # Process the element based on its type
-        if element_type == "text" and search_text:
-            # Find text in the image
-            text_matches = cv_find_text_in_image(image_data=screenshot_data, target=search_text)
-            
-            # Check if any matches were found
-            if not text_matches or len(text_matches) <= index:
-                return {
-                    "success": False,
-                    "error": f"Text '{search_text}' not found or index {index} out of bounds",
-                    "matches_found": len(text_matches) if text_matches else 0
-                }
-            
-            # Get the specified match
-            matched_word, bounds = text_matches[index]
-            x, y, w, h = bounds
-            element_position = {"x": x + w//2, "y": y + h//2}
-            element_info = {"text": matched_word, "bounds": bounds}
-            
-        elif element_type == "button":
-            if not ui_buttons or len(ui_buttons) <= index:
-                return {
-                    "success": False,
-                    "error": f"No button found at index {index}",
-                    "buttons_found": len(ui_buttons) if ui_buttons else 0
-                }
-                
-            # Handle the new button format which is a dict with 'text' and 'position'
-            button = ui_buttons[index]
-            button_text = button["text"] if "text" in button else "Unknown"
-            position = button["position"]
-            x, y = position["center_x"], position["center_y"]
-            
-            # Move and click at the button position
-            result = click_mouse_function(x, y, button=button_text, clicks=clicks, monitor=monitor_id)
-            
-            return {
-                "success": result,
-                "clicked_element": {
-                    "type": "button",
-                    "text": button_text,
-                    "position": position,
-                    "index": index
-                }
-            }
-            
-        elif element_type == "checkbox":
-            # Find checkbox elements
-            if not ui_checkboxes or len(ui_checkboxes) <= index:
-                return {
-                    "success": False,
-                    "error": f"No checkboxes found or index {index} out of bounds",
-                    "checkboxes_found": len(ui_checkboxes) if ui_checkboxes else 0
-                }
-                
-            # Get the specified checkbox
-            checkbox = ui_checkboxes[index]
-            element_position = {"x": checkbox["position"]["center_x"], "y": checkbox["position"]["center_y"]}
-            element_info = checkbox
-            
-        elif element_type == "region":
-            # Find image regions that match the description
-            if not ui_regions:
-                return {
-                    "success": False,
-                    "error": "No image regions detected",
-                    "regions_found": 0
-                }
-                
-            # If search text is provided, find regions that match the description
-            matching_regions = []
-            if search_text:
-                for region in ui_regions:
-                    if search_text.lower() in region["caption"].lower():
-                        matching_regions.append(region)
-            else:
-                matching_regions = ui_regions
-                
-            if not matching_regions or len(matching_regions) <= index:
-                return {
-                    "success": False,
-                    "error": f"No matching regions found for '{search_text}' or index {index} out of bounds",
-                    "matching_regions_found": len(matching_regions),
-                    "total_regions_found": len(ui_regions)
-                }
-                
-            # Get the specified region
-            region = matching_regions[index]
-            element_position = {"x": region["position"]["center_x"], "y": region["position"]["center_y"]}
-            element_info = {"caption": region["caption"], "position": region["position"]}
-        else:
-            return {
-                "success": False,
-                "error": f"Invalid element_type: {element_type}",
-                "valid_types": ["text", "button", "checkbox", "region"],
-                "tip": "Please specify a valid element type from the list."
-            }
-            
-        # Check if element was found
-        if not element_position or "x" not in element_position or "y" not in element_position:
-            return {
-                "success": False,
-                "error": f"Failed to get position for {element_type}",
-                "element_info": element_info
-            }
-            
-        # Click the element
-        x = element_position["x"]
-        y = element_position["y"]
-        
-        # Move mouse to the element
-        mouse_move_result = mouse_move(x, y, monitor_id)
-        if not mouse_move_result.get("success", False):
-            return {
-                "success": False,
-                "error": f"Failed to move mouse to position ({x}, {y})",
-                "mouse_move_result": mouse_move_result
-            }
-            
-        # Perform the click
-        mouse_click_result = mouse_click(x, y, button, clicks, monitor_id)
-        if not mouse_click_result.get("success", False):
-            return {
-                "success": False,
-                "error": f"Failed to click at position ({x}, {y})",
-                "mouse_click_result": mouse_click_result,
-                "element_info": element_info
-            }
-            
-        # Return success result
-        return {
-            "success": True,
-            "element_type": element_type,
-            "position": element_position,
-            "button": button,
-            "clicks": clicks,
-            "monitor_id": monitor_id,
-            "element_info": element_info
-        }
-    except Exception as e:
-        import traceback
-        print(f"Error clicking UI element: {str(e)}")
-        traceback.print_exc()
-        return {
-            "success": False,
-            "error": str(e),
-            "details": traceback.format_exc()
-        }
 
 @app.get("/type_text", operation_id="type_text")
 async def type_text(text: str):
@@ -426,20 +252,33 @@ async def api_activate_window(window_id: Optional[str] = None, window_title: Opt
         return {"success": False, "error": str(e)}
 
 @app.get("/launch_application", operation_id="launch_application")
-async def api_launch_application(app_name: str, app_path: Optional[str] = None):
-    """Launches an application. If this fails, you can try to launch the application like a user, eg superkey + search on debian via other functions.
-    After running this function, you should use list_windows to check if the application is open.
+async def api_launch_application(app_name: str, app_path: Optional[str] = None, launch_method: str = "GUI"):
+    """Launches an application. After running this function, you should use list_windows to check if the application is open.
+    The 2 diffrent methods are:
+    1. GUI: This is the default method and will use the GUI to launch the application.
+    2. Terminal: This will use the terminal to launch the application. This may be needed if GUI method doesn't work properly.
     
     Args:
         app_name: Name of the application to launch
         app_path: Full path to the application executable (optional)
+        launch_method: Method to launch the application - "Terminal" (default) or "GUI"
         
     Returns:
         Success status
     """
     try:
-        result = launch_application(app_name, app_path)
-        return {"success": result}
+        if launch_method.lower() == "gui":
+            # GUI method: Press Win key, type app name, press Enter
+            keyboard_press_keys(["win"])
+            time.sleep(0.5)
+            keyboard_type_text(app_name)
+            time.sleep(0.5)
+            keyboard_press_keys(["enter"])
+            return {"success": True}
+        else:
+            # Terminal method: Use the original launch_application function
+            result = launch_application(app_name, app_path)
+            return {"success": result}
     except Exception as e:
         print(f"Error launching application: {str(e)}")
         import traceback
@@ -565,7 +404,15 @@ async def api_open_downloads_folder():
 
 @app.get("/folder_contents", operation_id="folder_contents")
 async def api_folder_contents(folder_path: str):
-    """Get the contents of a folder"""
+    """Get the contents of a folder
+    Use this function to get the contents of a folder instead of screenshotting the folder.
+    
+    Args:
+        folder_path: Path to the folder to get the contents of
+        
+    Returns:
+        List of files and directories in the folder
+    """
     try:
         result = get_folder_contents(folder_path)
         return result
@@ -576,84 +423,74 @@ async def api_folder_contents(folder_path: str):
         return {"success": False, "error": str(e)}
 
 @app.get("/analyze_window", operation_id="analyze_window")
-async def analyze_window(window_id: str, window_title: Optional[str] = None):
-    """Analyze a window and return information about it
+async def api_analyze_window(window_id: str, window_title: Optional[str] = None):
+    """Analyze a window and return a list of UI elements
+    If you want to caption a window, use the caption_window endpoint.
     
-    Uses computer vision and BLIP to analyze the contents of a window.
-    Detects UI elements like buttons and checkboxes, and provides a caption
-    describing what's in the window.
+    Detects UI elements like buttons and checkboxes 
     
     Args:
         window_id: ID of the window to analyze
         window_title: Title of the window to analyze (optional, used if window_id not found)
         
     Returns:
-        Analysis results including caption, UI elements, and window metadata
+        Analysis results UI elements, and window metadata
     """
     try:
-        # Try to ensure xdotool/screenshot tools are available on Linux
+        print(f"Analyzing window with ID {window_id} and title {window_title}")
+        
+        # First ensure that required tools are available on Linux
         if platform.system() == "Linux":
             try:
-                # Check for xdotool
-                subprocess.run(['which', 'xdotool'], check=True, capture_output=True)
-            except subprocess.CalledProcessError:
-                print("xdotool not installed, attempting to install...")
-                try:
-                    subprocess.run(['sudo', 'apt-get', 'update'], check=False)
-                    subprocess.run(['sudo', 'apt-get', 'install', '-y', 'xdotool'], check=False)
-                except Exception as e:
-                    print(f"Failed to install xdotool: {e}")
-            
-            # Check for imagemagick (for import command)
-            try:
-                subprocess.run(['which', 'import'], check=True, capture_output=True)
-            except subprocess.CalledProcessError:
-                print("imagemagick not installed, attempting to install...")
-                try:
-                    subprocess.run(['sudo', 'apt-get', 'update'], check=False)
-                    subprocess.run(['sudo', 'apt-get', 'install', '-y', 'imagemagick'], check=False)
-                except Exception as e:
-                    print(f"Failed to install imagemagick: {e}")
+                subprocess.run(['which', 'xdotool', 'import', 'convert'], check=False, capture_output=True)
+                # Check if tools are available
+                result = subprocess.run(['command', '-v', 'xdotool'], shell=True, capture_output=True)
+                if result.returncode != 0:
+                    print("xdotool not found, recommending installation")
+                    return {
+                        "success": False,
+                        "error": "Required tool 'xdotool' not found",
+                        "message": "Please install xdotool with: sudo apt-get install xdotool"
+                    }
+                result = subprocess.run(['command', '-v', 'convert'], shell=True, capture_output=True)
+                if result.returncode != 0:
+                    return {
+                        "success": False,
+                        "error": "Required tool 'ImageMagick' not found",
+                        "message": "Please install ImageMagick with: sudo apt-get install imagemagick"
+                    }
+            except Exception as e:
+                print(f"Error checking for required tools: {e}")
         
-        print(f"Analyzing window with ID {window_id} and title {window_title}")
+        # Import the backend function
+        from cv_and_screenshots import caption_window as backend_caption_window
+        
+        # Activate the window first to bring it to front
+        activate_result = activate_window(window_id=window_id, window_title=window_title)
+        if not activate_result:
+            print(f"Warning: Failed to activate window {window_id} / {window_title}")
+            # Continue anyway as the screenshot might still work
+        
         # Call the backend function to analyze the window
-        result = cv_analyze_window(window_title=window_title, window_id=window_id)
+        result = backend_caption_window(window_title=window_title, window_id=window_id)
         
         if result is None:
-            return {"success": False, "error": "Window analysis returned None"}
+            return {
+                "success": False,
+                "error": "Window analysis returned None",
+                "message": "Failed to capture or analyze window. Check if the window exists and is visible."
+            }
             
         if "error" in result:
-            return {"success": False, "error": result["error"]}
-            
-        # Format checkbox results to be more user-friendly
-        formatted_checkboxes = []
-        if "ui_checkboxes" in result and result["ui_checkboxes"]:
-            # The checkboxes are already in the correct format with 'type' and 'position' keys
-            formatted_checkboxes = result["ui_checkboxes"]
+            return {
+                "success": False,
+                "error": result["error"],
+                "message": "Error analyzing window content."
+            }
         
-        # Process UI regions to remove binary data or encode it as base64
-        processed_regions = []
-        if "ui_regions" in result and result["ui_regions"]:
-            for region in result["ui_regions"]:
-                # Make a copy of the region without the binary image data
-                processed_region = region.copy()
-                if "image_data" in processed_region:
-                    # Either remove the image data
-                    del processed_region["image_data"]
-                    # Or encode it as base64 (uncomment below if you want to keep the images)
-                    # processed_region["image_data_base64"] = base64.b64encode(processed_region["image_data"]).decode('utf-8')
-                processed_regions.append(processed_region)
-        
-        # Create response with formatted data
         response = {
             "success": True,
-            "window_id": window_id,
-            "window_title": window_title,
-            "caption": result.get("caption", ""),
-            "buttons": result.get("buttons", []),
-            "checkboxes": formatted_checkboxes,
-            "ui_regions": processed_regions,
-            "window_info": result.get("window_info", {})
+            "caption": result
         }
         
         return response
@@ -661,13 +498,256 @@ async def analyze_window(window_id: str, window_title: Optional[str] = None):
         import traceback
         print(f"Error analyzing window: {str(e)}")
         traceback.print_exc()
-        error_traceback = traceback.format_exc()
+        error_details = traceback.format_exc()
         return {
             "success": False, 
             "error": str(e), 
-            "details": error_traceback,
+            "details": error_details,
             "message": "Failed to analyze window. Check if the window exists and if necessary screenshot tools are installed."
         }
+
+@app.get("/caption_window", operation_id="caption_window")
+async def api_caption_window(window_id: str, window_title: Optional[str] = None):
+    """Get only a caption description of a window using BLIP analysis.
+    
+    This lightweight endpoint captures a screenshot of the specified window and uses BLIP
+    to generate a textual description of its contents without performing other analysis.
+    
+    Args:
+        window_id: ID of the window to caption
+        window_title: Title of the window to caption (optional, used if window_id not found)
+        
+    Returns:
+        Caption description of the window contents
+    """
+    try:
+        print(f"Captioning window with ID {window_id} and title {window_title}")
+        
+        # First ensure that required tools are available on Linux
+        if platform.system() == "Linux":
+            try:
+                subprocess.run(['which', 'xdotool', 'import', 'convert'], check=False, capture_output=True)
+                # Try to install if not available
+                result = subprocess.run(['command', '-v', 'xdotool'], shell=True, capture_output=True)
+                if result.returncode != 0:
+                    print("xdotool not found, recommending installation")
+                    return {
+                        "success": False,
+                        "error": "Required tool 'xdotool' not found",
+                        "message": "Please install xdotool with: sudo apt-get install xdotool"
+                    }
+                result = subprocess.run(['command', '-v', 'convert'], shell=True, capture_output=True)
+                if result.returncode != 0:
+                    return {
+                        "success": False,
+                        "error": "Required tool 'ImageMagick' not found",
+                        "message": "Please install ImageMagick with: sudo apt-get install imagemagick"
+                    }
+            except Exception as e:
+                print(f"Error checking for required tools: {e}")
+        
+        # Import the backend function to avoid name conflicts
+        from cv_and_screenshots import caption_window as backend_caption_window
+        
+        # Activate the window first to bring it to front
+        activate_result = activate_window(window_id=window_id, window_title=window_title)
+        if not activate_result:
+            print(f"Warning: Failed to activate window {window_id} / {window_title}")
+            # Continue anyway as the screenshot might still work
+        
+        # Call the backend function to analyze the window
+        result = backend_caption_window(window_title=window_title, window_id=window_id)
+        
+        if result is None:
+            return {
+                "success": False,
+                "error": "Window analysis returned None",
+                "message": "Failed to capture or analyze window. Check if the window exists and is visible."
+            }
+            
+        if "error" in result:
+            return {
+                "success": False,
+                "error": result["error"],
+                "message": "Error analyzing window content."
+            }
+        
+        # Create a simplified response with just the caption
+        response = {
+            "success": True,
+            "window_id": window_id,
+            "window_title": window_title if window_title else "Unknown",
+            "caption": result.get("caption", "")
+        }
+        
+        return response
+    except Exception as e:
+        import traceback
+        print(f"Error captioning window: {str(e)}")
+        traceback.print_exc()
+        error_details = traceback.format_exc()
+        return {
+            "success": False,
+            "error": str(e),
+            "details": error_details,
+            "message": "Failed to caption window. Check logs for details."
+        }
+
+@app.get("/click_window_element", operation_id="click_window_element")
+async def api_click_window_element(window_id: str, element_x: int, element_y: int, 
+                                  element_width: Optional[int] = None, element_height: Optional[int] = None,
+                                  button: str = "left", clicks: int = 1):
+    """Click on a UI element in a window using coordinates relative to the window.
+    
+    This endpoint correctly translates window-relative coordinates to screen coordinates
+    before clicking, solving the coordinate translation problem between window analysis and clicking.
+    
+    Args:
+        window_id: ID of the window
+        element_x: X coordinate of the UI element relative to the window
+        element_y: Y coordinate of the UI element relative to the window
+        element_width: Width of the UI element (optional)
+        element_height: Height of the UI element (optional)
+        button: Mouse button ('left', 'right', 'middle')
+        clicks: Number of clicks
+    
+    Returns:
+        Success status
+    """
+    try:
+        # First, get window information
+        windows = get_open_windows()
+        target_window = None
+        
+        for window in windows:
+            if "id" in window and str(window["id"]) == str(window_id):
+                target_window = window
+                break
+                
+        if not target_window:
+            return {
+                "success": False, 
+                "error": f"Window with ID {window_id} not found"
+            }
+            
+        # Create element position object
+        element_position = {
+            "x": element_x,
+            "y": element_y
+        }
+        
+        # Add width and height if provided
+        if element_width is not None:
+            element_position["width"] = element_width
+        if element_height is not None:
+            element_position["height"] = element_height
+            
+        # Calculate center_x and center_y if width and height are available
+        if element_width is not None and element_height is not None:
+            element_position["center_x"] = element_x + element_width // 2
+            element_position["center_y"] = element_y + element_height // 2
+            
+        # Click on the element
+        result = click_window_element(target_window, element_position, button, clicks)
+        
+        if not result:
+            return {
+                "success": False,
+                "error": "Failed to click window element. See logs for details."
+            }
+            
+        return {"success": True}
+    except Exception as e:
+        import traceback
+        print(f"Error in click_window_element: {str(e)}")
+        traceback.print_exc()
+        return {"success": False, "error": str(e)}
+
+@app.get("/click_ui_element", operation_id="click_ui_element")
+async def api_click_ui_element(window_id: str, element_index: int, element_type: str = "button", button: str = "left", clicks: int = 1):
+    """Click on a UI element that was detected by the analyze_window function.
+    
+    This endpoint first gets the window analysis results, then clicks on the specified UI element
+    using its coordinates. This solves the coordinate translation problem by handling both
+    analysis and clicking in one operation.
+    
+    Args:
+        window_id: ID of the window
+        element_index: Index of the UI element in the analysis results (0-based)
+        element_type: Type of UI element ('button', 'checkbox', 'text', 'region')
+        button: Mouse button ('left', 'right', 'middle')
+        clicks: Number of clicks
+    
+    Returns:
+        Success status
+    """
+    try:
+        # First, analyze the window to get UI elements
+        window_analysis = cv_analyze_window(window_id=window_id)
+        
+        if not window_analysis or "error" in window_analysis:
+            error_msg = window_analysis.get("error", "Unknown error") if window_analysis else "Window analysis failed"
+            return {
+                "success": False, 
+                "error": f"Failed to analyze window: {error_msg}"
+            }
+            
+        # Get the UI elements list based on element_type
+        ui_elements = []
+        if element_type == "button":
+            ui_elements = window_analysis.get("buttons", [])
+        elif element_type == "checkbox":
+            ui_elements = window_analysis.get("checkboxes", [])
+        elif element_type == "text":
+            ui_elements = window_analysis.get("extracted_text", [])
+        elif element_type == "region":
+            ui_elements = window_analysis.get("ui_regions", [])
+        else:
+            return {
+                "success": False,
+                "error": f"Unknown element type: {element_type}"
+            }
+            
+        # Check if the element index is valid
+        if not ui_elements or element_index < 0 or element_index >= len(ui_elements):
+            return {
+                "success": False,
+                "error": f"Element index {element_index} out of range (0-{len(ui_elements)-1 if ui_elements else 0})"
+            }
+            
+        # Get the element
+        element = ui_elements[element_index]
+        
+        # Check if the element has position information
+        if "position" not in element:
+            return {
+                "success": False,
+                "error": f"Element has no position information: {element}"
+            }
+            
+        # Get window info
+        window_info = window_analysis.get("window_info", {})
+        
+        # Click on the element
+        result = click_window_element(window_info, element["position"], button, clicks)
+        
+        if not result:
+            return {
+                "success": False,
+                "error": "Failed to click UI element. See logs for details."
+            }
+            
+        return {
+            "success": True,
+            "element": element,
+            "element_type": element_type,
+            "index": element_index
+        }
+    except Exception as e:
+        import traceback
+        print(f"Error in click_ui_element: {str(e)}")
+        traceback.print_exc()
+        return {"success": False, "error": str(e)}
 
 # Expose MCP server
 mcp = FastApiMCP(app, name="pinoMCP")
