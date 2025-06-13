@@ -1,7 +1,7 @@
 import base64
 from fastapi import FastAPI, Body, HTTPException
 from fastapi_mcp import FastApiMCP
-from cv_and_screenshots import get_available_monitors, get_screenshot, caption_window, get_screenshot_with_analysis, find_text_in_image as cv_find_text_in_image 
+from cv_and_screenshots import get_available_monitors, get_screenshot, caption_window, get_screenshot_with_analysis, find_text_in_image as cv_find_text_in_image, analyze_window
 from mouse_control import mouse_move as move_mouse_function, mouse_click as click_mouse_function, click_window_element
 from keyboard_control import keyboard_type_text, keyboard_press_keys, keyboard_layout_info
 from window_control import get_open_windows, activate_window, launch_application
@@ -462,8 +462,8 @@ async def api_analyze_window(window_id: str, window_title: Optional[str] = None)
             except Exception as e:
                 print(f"Error checking for required tools: {e}")
         
-        # Import the backend function
-        from cv_and_screenshots import caption_window as backend_caption_window
+        # Import the backend function - now using analyze_window instead of caption_window
+        from cv_and_screenshots import analyze_window
         
         # Activate the window first to bring it to front
         activate_result = activate_window(window_id=window_id, window_title=window_title)
@@ -471,8 +471,8 @@ async def api_analyze_window(window_id: str, window_title: Optional[str] = None)
             print(f"Warning: Failed to activate window {window_id} / {window_title}")
             # Continue anyway as the screenshot might still work
         
-        # Call the backend function to analyze the window
-        result = backend_caption_window(window_title=window_title, window_id=window_id)
+        # Call the backend function to analyze the window and extract UI elements
+        result = analyze_window(window_title=window_title, window_id=window_id)
         
         if result is None:
             return {
@@ -488,9 +488,15 @@ async def api_analyze_window(window_id: str, window_title: Optional[str] = None)
                 "message": "Error analyzing window content."
             }
         
+        # Create a comprehensive response with all the UI elements
         response = {
             "success": True,
-            "caption": result
+            "caption": result.get("caption", ""),
+            "text_elements": result.get("text_elements", []),
+            "buttons": result.get("buttons", []),
+            "checkboxes": result.get("checkboxes", []),
+            "ui_regions": result.get("ui_regions", []),
+            "window_info": result.get("window_info", {})
         }
         
         return response
@@ -576,7 +582,6 @@ async def api_caption_window(window_id: str, window_title: Optional[str] = None)
         response = {
             "success": True,
             "window_id": window_id,
-            "window_title": window_title if window_title else "Unknown",
             "caption": result.get("caption", "")
         }
         

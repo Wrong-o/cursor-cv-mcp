@@ -11,6 +11,15 @@ import os
 import time
 import PIL
 from transformers import Blip2Processor, Blip2ForConditionalGeneration
+import torch
+
+# Initialize globals for BLIP model
+global blip_model, blip_processor
+BLIP_MODEL_LOADED = False
+blip_model = None
+blip_processor = None
+blip_config = {"max_new_tokens": 100}
+
 # Ensure required packages are available
 try:
     import mss
@@ -92,37 +101,72 @@ try:
 except ImportError:
     print("torch/transformers not found - some AI vision features will be limited")
 
-# Config
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-blip_config = {
-    "model_name": "Salesforce/blip-image-captioning-base",  # BLIP-1
-    "max_new_tokens": 200,
-    "torch_dtype": torch.float16 if torch.cuda.is_available() else torch.float32
-}
-print(f"Using device: {device}")
-
-# Load BLIP-1
-blip_processor = BlipProcessor.from_pretrained(blip_config["model_name"])
-blip_model = BlipForConditionalGeneration.from_pretrained(
-    blip_config["model_name"],
-    torch_dtype=blip_config["torch_dtype"]
-).to(device)
-
-BLIP_MODEL_LOADED = True
-BLIP_MODEL = blip_model
 
 def load_blip_model():
-    global blip_processor, blip_model
-    if blip_processor is None or blip_model is None:
-        print("Loading BLIP-2 model...")
-        blip_processor = Blip2Processor.from_pretrained(blip_config["model_name"])
-        blip_model = Blip2ForConditionalGeneration.from_pretrained(
-            blip_config["model_name"],
-            torch_dtype=blip_config["torch_dtype"],
-            device_map="auto"  # handles GPU/CPU automatically
-        )
-        print("BLIP-2 model loaded successfully.")
-    return blip_processor, blip_model
+    global BLIP_MODEL_LOADED, blip_model, blip_processor
+    
+    print("Starting BLIP model loading process...")
+    
+    # Check if already loaded successfully
+    if BLIP_MODEL_LOADED and blip_model is not None and blip_processor is not None:
+        print("BLIP model already loaded, reusing existing model")
+        return blip_processor, blip_model
+    
+    try:
+        # First check if torch and transformers are available
+        try:
+            import torch
+            from transformers import Blip2Processor, Blip2ForConditionalGeneration
+            print(f"Using torch {torch.__version__} on device: {device}")
+        except ImportError as imp_err:
+            print(f"Required libraries not available: {imp_err}")
+            print("Please install with: pip install torch transformers")
+            BLIP_MODEL_LOADED = False
+            return None, None
+        
+        # Use a smaller model if available
+        model_options = [
+            "Salesforce/blip2-opt-2.7b",  # First choice - larger but better
+        ]
+        
+        # Try each model until one works
+        for model_name in model_options:
+            try:
+                print(f"Attempting to load model: {model_name}")
+                
+                # Try with less memory usage for systems with limited GPU/RAM
+                processor = Blip2Processor.from_pretrained(model_name)
+                
+                # Set lower precision and offload to CPU if memory is limited
+                model = Blip2ForConditionalGeneration.from_pretrained(
+                    model_name,
+                    torch_dtype=torch.float16 if torch.cuda.is_available() else torch.float32,
+                    device_map="auto",
+                    offload_folder="offload",  # Offload to disk if needed
+                    revision="main"
+                )
+                
+                print(f"Successfully loaded model: {model_name}")
+                BLIP_MODEL_LOADED = True
+                blip_processor = processor
+                blip_model = model
+                return processor, model
+            except Exception as model_err:
+                print(f"Failed to load model {model_name}: {model_err}")
+                continue
+        
+        # If we get here, all models failed
+        print("All model options failed to load")
+        BLIP_MODEL_LOADED = False
+        return None, None
+    except Exception as e:
+        print(f"Unexpected error loading BLIP model: {e}")
+        import traceback
+        traceback.print_exc()
+        BLIP_MODEL_LOADED = False
+        return None, None
+
 def get_available_monitors():
         try:
             with mss.mss() as sct:
@@ -165,56 +209,54 @@ def get_screenshot(monitor_id: int = 1) -> bytes:
         img.save(buf, format='JPEG')
         return buf.getvalue()
 
-def caption_image(image_data: bytes) -> Dict[str, Any]:
-    """
-    Analyze the image content.
+
+def caption_image(image: np.ndarray) -> Dict[str, str]:
+    global blip_model, blip_processor, BLIP_MODEL_LOADED
     
-    Args:
-        image_data: Raw image data
-    
-    Returns:
-        Dict containing analysis results
-    """
-    # Validate image data
-    if not image_data or len(image_data) == 0:
-        print("Error: Empty image data provided to caption_image")
-        return {"caption": "No image data available", "error": "Empty image data"}
+    # Check if model is loaded, if not, load it
+    if not BLIP_MODEL_LOADED or blip_model is None or blip_processor is None:
+        try:
+            print("Loading BLIP model for image captioning...")
+            blip_processor, blip_model = load_blip_model()
+            if not blip_processor or not blip_model:
+                print("Failed to load BLIP model properly")
+                return {"caption": "Unable to load image captioning model", 
+                        "error": "Model initialization failed"}
+            print("BLIP model loaded successfully")
+        except Exception as e:
+            print(f"Error loading BLIP model: {e}")
+            return {"caption": "Failed to load image captioning model", "error": str(e)}
     
     try:
-        # Try to validate the image data first
-        image_io = io.BytesIO(image_data)
-        img_check = Image.open(image_io)
-        img_check.verify()  # Verify image data is valid
-        image_io.seek(0)  # Reset file pointer
+        # Convert bytes to PIL Image if image is in bytes format
+        if isinstance(image, bytes):
+            image_pil = Image.open(io.BytesIO(image))
+            print(f"Loaded image from bytes, size: {image_pil.size}")
+        else:
+            image_pil = Image.fromarray(image)
+            print(f"Converted numpy array to PIL Image, size: {image_pil.size}")
+            
+        # Use no-prompt approach directly since it's what worked
+        print("Using no-prompt approach for image captioning")
+        inputs = blip_processor(images=image_pil, text="", return_tensors="pt").to(device)
         
-        # Get cached or load BLIP model
-        processor, model = load_blip_model()
+        # Generate caption with more parameters for better quality
+        out = blip_model.generate(
+            **inputs, 
+            max_new_tokens=100,
+            num_beams=5,
+            no_repeat_ngram_size=3,
+            temperature=0.7
+        )
+        caption = blip_processor.tokenizer.decode(out[0], skip_special_tokens=True, clean_up_tokenization_spaces=True)
         
-        image = Image.open(image_io)
-        inputs = processor(image, return_tensors="pt")
-        
-        # Move inputs to the same device as model
-        inputs = {k: v.to(device) for k, v in inputs.items()}
-        
-        with torch.no_grad():  # Disable gradient calculation for inference
-            out = model.generate(**inputs, max_new_tokens=blip_config["max_new_tokens"])
-        caption = processor.decode(out[0], skip_special_tokens=True)
-        print(f"Caption: {caption}")
-        
-        # Clear CUDA cache to prevent memory leaks if using GPU
-        if torch.cuda.is_available():
-            torch.cuda.empty_cache()
-        
+        print(f"Generated caption with no prompt: '{caption}'")
         return {"caption": caption}
-
-    except PIL.UnidentifiedImageError as e:
-        print(f"UnidentifiedImageError in caption_image: {e}")
-        return {"caption": "Could not identify image format", "error": str(e)}
     except Exception as e:
+        print(f"Error generating image caption: {e}")
         import traceback
-        print(f"Error in caption_image: {e}")
         traceback.print_exc()
-        return {"caption": "Error analyzing image", "error": str(e)}
+        return {"caption": "Failed to generate caption", "error": str(e)}
 
 def cv_detect_and_analyze_regions(image_data: bytes) -> List[Dict[str, Any]]:
     """
@@ -226,6 +268,8 @@ def cv_detect_and_analyze_regions(image_data: bytes) -> List[Dict[str, Any]]:
     Returns:
         List of dictionaries containing region information and analysis
     """
+    global blip_model, blip_processor, BLIP_MODEL_LOADED
+    
     try:
         print("Detecting and analyzing image-like regions...")
         
@@ -271,8 +315,19 @@ def cv_detect_and_analyze_regions(image_data: bytes) -> List[Dict[str, Any]]:
         # Store potential UI regions
         regions = []
         
-        # Get cached or load BLIP model
-        processor, model = load_blip_model()
+        # Get cached or load BLIP model - using same pattern as caption_image function
+        if not BLIP_MODEL_LOADED or blip_processor is None or blip_model is None:
+            try:
+                print("Loading BLIP model for region analysis...")
+                blip_processor, blip_model = load_blip_model()
+                if blip_processor is None or blip_model is None:
+                    print("Failed to load BLIP model, skipping region analysis")
+                    return []
+            except Exception as e:
+                print(f"Error loading BLIP model: {e}")
+                return []
+        
+        processor, model = blip_processor, blip_model
         
         # Process each contour
         for contour in contours:
@@ -307,7 +362,7 @@ def cv_detect_and_analyze_regions(image_data: bytes) -> List[Dict[str, Any]]:
             
             # Analyze the region with BLIP
             try:
-                inputs = processor(region_pil, return_tensors="pt")
+                inputs = processor(images=region_pil, text="What can you see in this image?", return_tensors="pt")
                 
                 # Move inputs to the same device as model
                 inputs = {k: v.to(device) for k, v in inputs.items()}
@@ -1323,14 +1378,54 @@ def caption_window(window_title: str = None, window_id: str = None) -> Dict[str,
             print("Error: Empty window image data")
             return {"error": "Empty window image data"}
             
-        # Get window image description
-        image_analysis = caption_image(window_image)
+        # Try the primary BLIP captioning method first
+        try:
+            # Get window image description
+            print("Attempting primary caption method with BLIP...")
+            image_analysis = caption_image(window_image)
+            
+            # Check if we got a valid caption
+            caption_text = image_analysis.get("caption", "")
+            if caption_text and "error" not in image_analysis and not caption_text.startswith("Failed to"):
+                print(f"Successfully generated caption: {caption_text}")
+                return {
+                    "caption": caption_text,
+                }
+            else:
+                print(f"BLIP captioning failed or returned an error: {image_analysis}")
+                # Continue to fallback methods
+        except Exception as caption_error:
+            print(f"Error in primary caption method: {caption_error}")
+            import traceback
+            traceback.print_exc()
+            # Continue to fallback methods
+
+        # Fallback 1: Try OCR to extract text from the window
+        print("Attempting fallback: OCR text extraction...")
+        try:
+            extracted_text = extract_text_from_window(window_image)
+            if extracted_text and len(extracted_text) > 0:
+                # Collect top text entries based on confidence
+                text_items = [item["text"] for item in extracted_text[:10]]
+                top_text = ", ".join(text_items)
+                fallback_caption = f"Window containing text: {top_text}"
+                print(f"Generated fallback caption from OCR: {fallback_caption}")
+                return {
+                    "caption": fallback_caption,
+                    "note": "Caption generated using OCR fallback method"
+                }
+        except Exception as ocr_error:
+            print(f"OCR fallback failed: {ocr_error}")
+            
+        # Fallback 2: Basic window information
+        print("Using basic window information as final fallback...")
+        window_title = target_window.get("title", "Unknown window")
+        basic_caption = f"Window titled '{window_title}'"
         
-        result = {
-            "caption": image_analysis.get("caption", ""),
+        return {
+            "caption": basic_caption,
+            "note": "Caption generated using basic window information fallback"
         }
-        
-        return result
     except Exception as e:
         import traceback
         print(f"Error analyzing window content: {e}")
@@ -2428,4 +2523,177 @@ def distance_between_boxes(box1, box2):
     center2 = (x2 + w2//2, y2 + h2//2)
     
     return ((center1[0] - center2[0])**2 + (center1[1] - center2[1])**2)**0.5
+
+def analyze_window(window_title: str = None, window_id: str = None) -> Dict[str, Any]:
+    """
+    Capture a window and analyze it to extract UI elements like text and buttons.
+    
+    Args:
+        window_title: Title of the window to analyze
+        window_id: ID of the window to analyze (platform-specific, optional)
+    
+    Returns:
+        Dict containing analysis results with:
+        - caption: Description of the window content
+        - text_elements: List of text elements with positions
+        - buttons: List of button-like elements with positions
+        - window_info: Information about the captured window
+    """
+    system = platform.system()
+    window_image = None
+    window_info = None
+    
+    print(f"Analyzing window with ID {window_id} and title {window_title}")
+    
+    # Find window info based on title or ID
+    windows = []
+    try:
+        # Import locally to avoid module-level import issues
+        from window_control import get_open_windows
+        windows = get_open_windows()
+    except Exception as e:
+        print(f"Error getting window list: {e}")
+        print(f"Window control module not available or failed, falling back to basic window detection")
+        import traceback
+        traceback.print_exc()
+    
+    # Find the target window
+    target_window = None
+    if windows:
+        for window in windows:
+            if window_id and "id" in window and str(window["id"]) == str(window_id):
+                target_window = window
+                break
+            elif window_title and "title" in window and window_title.lower() in window["title"].lower():
+                target_window = window
+                break
+    
+    if target_window is None:
+        print(f"Warning: No window found with ID {window_id} or title {window_title}")
+        # Create a minimal target window with the provided information
+        target_window = {"id": window_id, "title": window_title}
+    
+    # Capture the window content
+    try:
+        if system == "Windows":
+            window_image = _capture_window_windows(target_window, window_title, window_id)
+        elif system == "Darwin":  # macOS
+            window_image = _capture_window_macos(target_window, window_title, window_id)
+        elif system == "Linux":
+            window_image = _capture_window_linux(target_window, window_title, window_id)
+        else:
+            print(f"Unsupported platform: {system}")
+            return {"error": f"Unsupported platform: {system}"}
+    except Exception as e:
+        import traceback
+        print(f"Error capturing window: {e}")
+        traceback.print_exc()
+        return {"error": f"Error capturing window: {str(e)}"}
+    
+    try:
+        if not window_image or len(window_image) == 0:
+            print("Error: Empty window image data")
+            return {"error": "Empty window image data"}
+
+        # Initialize result components with default values
+        caption = ""
+        text_elements = []
+        buttons = []
+        checkboxes = []
+        ui_regions = []
+            
+        # Get window image description - in a try-except block for each step
+        try:
+            image_analysis = caption_image(window_image)
+            caption = image_analysis.get("caption", "")
+            print(f"Generated caption: {caption[:50]}...")
+        except Exception as e:
+            print(f"Error generating caption: {e}")
+            import traceback
+            traceback.print_exc()
+            caption = "Unable to generate caption"
+        
+        # Extract text elements from the window image
+        try:
+            text_elements = extract_text_from_window(window_image)
+            print(f"Found {len(text_elements)} text elements")
+        except Exception as e:
+            print(f"Error extracting text: {e}")
+            import traceback
+            traceback.print_exc()
+        
+        # Find button-like elements
+        try:
+            buttons = cv_find_all_buttons(window_image)
+            print(f"Found {len(buttons)} buttons")
+        except Exception as e:
+            print(f"Error finding buttons: {e}")
+            import traceback
+            traceback.print_exc()
+        
+        # Find checkbox elements
+        try:
+            checkboxes = cv_find_checkboxes(window_image)
+            print(f"Found {len(checkboxes)} checkboxes")
+        except Exception as e:
+            print(f"Error finding checkboxes: {e}")
+            import traceback
+            traceback.print_exc()
+        
+        # Extract image regions that might contain important content
+        try:
+            ui_regions = cv_detect_and_analyze_regions(window_image)
+            # Remove binary image_data from regions to avoid serialization issues
+            for region in ui_regions:
+                if "image_data" in region:
+                    # Remove binary image data that can't be JSON serialized
+                    del region["image_data"]
+            print(f"Found {len(ui_regions)} UI regions")
+        except Exception as e:
+            print(f"Error detecting UI regions: {e}")
+            import traceback
+            traceback.print_exc()
+        
+        # Create and sanitize window_info to ensure it's serializable
+        safe_window_info = {}
+        try:
+            for key, value in target_window.items():
+                # Only include serializable types
+                if isinstance(value, (str, int, float, bool, list, dict)) or value is None:
+                    safe_window_info[key] = value
+        except Exception as e:
+            print(f"Error sanitizing window info: {e}")
+            safe_window_info = {"id": window_id, "title": window_title}
+        
+        # Create result dictionary with safe values
+        result = {
+            "caption": caption,
+            "text_elements": text_elements,
+            "buttons": buttons,
+            "checkboxes": checkboxes,
+            "ui_regions": ui_regions,
+            "window_info": safe_window_info
+        }
+        
+        # Final check - remove any binary data that might cause serialization issues
+        def remove_binary(obj):
+            if isinstance(obj, dict):
+                for key in list(obj.keys()):
+                    if isinstance(obj[key], bytes):
+                        del obj[key]
+                    elif isinstance(obj[key], (dict, list)):
+                        remove_binary(obj[key])
+            elif isinstance(obj, list):
+                for item in obj:
+                    if isinstance(item, (dict, list)):
+                        remove_binary(item)
+        
+        remove_binary(result)
+        print("Successfully created analysis result")
+        return result
+    except Exception as e:
+        import traceback
+        print(f"Error analyzing window content: {e}")
+        traceback.print_exc()
+        return {"error": f"Error analyzing window content: {str(e)}"}
  
