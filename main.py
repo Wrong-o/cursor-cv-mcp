@@ -1,7 +1,7 @@
 import base64
 from fastapi import FastAPI, Body, HTTPException
 from fastapi_mcp import FastApiMCP
-from cv_and_screenshots import get_available_monitors, get_screenshot, caption_window, get_screenshot_with_analysis, find_text_in_image as cv_find_text_in_image, analyze_window
+from cv_and_screenshots import get_available_monitors, get_screenshot, caption_window, get_screenshot_with_analysis, find_text_in_image as cv_find_text_in_image, analyze_window, get_screenshot_at_mouse, extract_dropdown_options
 from mouse_control import mouse_move as move_mouse_function, mouse_click as click_mouse_function, click_window_element
 from keyboard_control import keyboard_type_text, keyboard_press_keys, keyboard_layout_info
 from window_control import get_open_windows, activate_window, launch_application
@@ -16,6 +16,7 @@ from os_info import get_os_info
 import platform
 import subprocess
 import time
+import pyautogui
 
 class PressKeysInput(BaseModel):
     """Input for the press_keys endpoint"""
@@ -384,8 +385,8 @@ async def mcp_read_with_voice(text: str, speaker_id: Optional[int] = 0):
         traceback.print_exc()
         return {"success": False, "error": f"Failed to generate speech: {str(e)}"}
 
-@app.get("/open_downloads_folder", operation_id="open_downloads_folder")
-async def api_open_downloads_folder():
+@app.get("/open_folder_gui", operation_id="open_folder_gui")
+async def api_open_folder_gui(folder_path: str):
     """Open the user's Downloads folder based on the operating system.
     
     Works on Windows, macOS, and Linux.
@@ -402,8 +403,8 @@ async def api_open_downloads_folder():
         traceback.print_exc()
         return {"success": False, "error": str(e)}
 
-@app.get("/folder_contents", operation_id="folder_contents")
-async def api_folder_contents(folder_path: str):
+@app.get("/list_folder_contents", operation_id="list_folder_contents")
+async def api_list_folder_contents(folder_path: str):
     """Get the contents of a folder
     Use this function to get the contents of a folder instead of screenshotting the folder.
     
@@ -751,6 +752,89 @@ async def api_click_ui_element(window_id: str, element_index: int, element_type:
     except Exception as e:
         import traceback
         print(f"Error in click_ui_element: {str(e)}")
+        traceback.print_exc()
+        return {"success": False, "error": str(e)}
+
+@app.get("/screenshot_at_mouse", operation_id="screenshot_at_mouse")
+async def screenshot_at_mouse(width: int = 300, height: int = 300):
+    """Capture a screenshot of a rectangular area extending down and to the right from the current mouse position.
+    Useful for capturing dropdown menus after a right-click.
+    
+    Args:
+        width: Width of the area to capture in pixels (default: 300)
+        height: Height of the area to capture in pixels (default: 300)
+        
+    Returns:
+        JSON with base64 encoded image data and status
+    """
+    try:
+        screenshot_data = get_screenshot_at_mouse(width, height)
+        
+        if screenshot_data is None:
+            return {"success": False, "error": "Failed to capture screenshot at mouse position"}
+        
+        # Convert to base64 for API response
+        base64_image = base64.b64encode(screenshot_data).decode('utf-8')
+        
+        return {
+            "success": True, 
+            "image_data": base64_image,
+            "format": "png",
+            "width": width,
+            "height": height
+        }
+    except Exception as e:
+        import traceback
+        print(f"Error in screenshot_at_mouse: {str(e)}")
+        traceback.print_exc()
+        return {"success": False, "error": str(e)}
+
+@app.get("/get_dropdown_at_mouse", operation_id="get_dropdown_at_mouse")
+async def get_dropdown_at_mouse(width: int = 300, height: int = 300, include_image: bool = False):
+    """Capture a screenshot at the current mouse position and extract dropdown menu options.
+    This is especially useful after a right-click to capture context menus.
+    
+    Args:
+        width: Width of the area to capture in pixels (default: 300)
+        height: Height of the area to capture in pixels (default: 300)
+        include_image: Whether to include the base64 encoded screenshot in the response (default: False)
+        
+    Returns:
+        JSON with menu lines including text and absolute position information
+    """
+    try:
+        # First capture the screenshot
+        screenshot_data = get_screenshot_at_mouse(width, height)
+        
+        if screenshot_data is None:
+            return {"success": False, "error": "Failed to capture screenshot at mouse position"}
+        
+        # Extract menu options from the screenshot
+        menu_lines = extract_dropdown_options(screenshot_data)
+        
+        # Get current mouse position for reference
+        mouse_x, mouse_y = pyautogui.position()
+        
+        response = {
+            "success": True,
+            "menu_lines": menu_lines,
+            "count": len(menu_lines),
+            "mouse_position": {
+                "x": mouse_x,
+                "y": mouse_y
+            }
+        }
+        
+        # Include the image data if requested
+        if include_image:
+            base64_image = base64.b64encode(screenshot_data).decode('utf-8')
+            response["image_data"] = base64_image
+            response["format"] = "png"
+        
+        return response
+    except Exception as e:
+        import traceback
+        print(f"Error in get_dropdown_at_mouse: {str(e)}")
         traceback.print_exc()
         return {"success": False, "error": str(e)}
 

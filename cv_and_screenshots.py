@@ -12,6 +12,7 @@ import time
 import PIL
 from transformers import Blip2Processor, Blip2ForConditionalGeneration
 import torch
+import pyautogui
 
 # Initialize globals for BLIP model
 global blip_model, blip_processor
@@ -63,6 +64,19 @@ except ImportError:
         print("Pillow package installed successfully")
     except Exception as e:
         print(f"Failed to install Pillow package: {e}")
+
+# Try importing pyautogui for mouse position
+try:
+    import pyautogui
+except ImportError:
+    print("pyautogui not found, attempting to install...")
+    try:
+        import subprocess
+        subprocess.check_call(["pip", "install", "pyautogui"])
+        import pyautogui
+        print("pyautogui package installed successfully")
+    except Exception as e:
+        print(f"Failed to install pyautogui package: {e}")
 
 # Try importing OpenCV and numpy for image processing
 try:
@@ -304,16 +318,18 @@ def cv_detect_and_analyze_regions(image_data: bytes) -> List[Dict[str, Any]]:
         # Find contours in the binary image
         contours, _ = cv2.findContours(binary, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
         
-        # Minimum region size - ignore very small regions
-        min_region_size = max(64, min(height, width) * 0.05)
-        # Maximum region size - ignore very large regions (like the entire screen)
-        max_region_size = min(height, width) * 0.5
+        # MODIFIED: More permissive minimum region size for browser content
+        min_region_size = max(40, min(height, width) * 0.03)  # Reduced from 0.05 to 0.03
         
-        # Maximum number of regions to analyze to avoid performance issues
-        max_regions = 10
+        # Maximum region size - increased to handle larger browser images
+        max_region_size = min(height, width) * 0.7  # Increased from 0.5 to 0.7
+        
+        # MODIFIED: Reduced max regions to prevent memory issues
+        max_regions = 8  # Reduced from 20 to 8 to prevent CUDA OOM
         
         # Store potential UI regions
         regions = []
+        candidate_regions = []  # Store region coordinates before processing
         
         # Get cached or load BLIP model - using same pattern as caption_image function
         if not BLIP_MODEL_LOADED or blip_processor is None or blip_model is None:
@@ -329,7 +345,73 @@ def cv_detect_and_analyze_regions(image_data: bytes) -> List[Dict[str, Any]]:
         
         processor, model = blip_processor, blip_model
         
-        # Process each contour
+        # Check GPU memory availability
+        try:
+            is_gpu_low_memory = False
+            if torch.cuda.is_available():
+                total_mem = torch.cuda.get_device_properties(0).total_memory
+                reserved_mem = torch.cuda.memory_reserved(0)
+                allocated_mem = torch.cuda.memory_allocated(0)
+                free_mem = total_mem - reserved_mem
+                print(f"GPU memory - Total: {total_mem/1e9:.2f}GB, Free: {free_mem/1e9:.2f}GB, Used: {allocated_mem/1e9:.2f}GB")
+                
+                # If less than 1GB free, consider low memory
+                if free_mem < 1e9:
+                    print("GPU memory is low, will use reduced processing or CPU fallback")
+                    is_gpu_low_memory = True
+        except Exception as e:
+            print(f"Error checking GPU memory: {e}")
+            is_gpu_low_memory = True
+        
+        # ADDED: Browser-specific detection for rectangular images
+        # This helps detect images in search results and web content
+        browser_images = []
+        try:
+            # Apply Canny edge detection with parameters tuned for web content
+            edges = cv2.Canny(blurred, 50, 150)
+            # Dilate edges to connect broken ones
+            kernel = np.ones((3,3), np.uint8)
+            dilated_edges = cv2.dilate(edges, kernel, iterations=1)
+            
+            # Find rectangular contours (common for web images)
+            web_contours, _ = cv2.findContours(dilated_edges, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+            
+            for contour in web_contours:
+                # Get bounding rectangle
+                x, y, w, h = cv2.boundingRect(contour)
+                
+                # Minimum size for browser images (smaller than general detection)
+                if w < 40 or h < 40:  # More permissive minimum size
+                    continue
+                
+                # Skip if too large
+                if w > width * 0.9 or h > height * 0.9:
+                    continue
+                
+                # Calculate aspect ratio - web images often have standard aspect ratios
+                aspect_ratio = float(w) / h
+                
+                # Most web images have reasonable aspect ratios between 0.5 and 2.5
+                if aspect_ratio < 0.5 or aspect_ratio > 2.5:
+                    continue
+                
+                # Extract the region
+                region_img = original_img[y:y+h, x:x+w]
+                
+                # Check for content diversity - images should have varied pixel values
+                region_gray = cv2.cvtColor(region_img, cv2.COLOR_BGR2GRAY)
+                _, region_std = cv2.meanStdDev(region_gray)
+                
+                # Skip regions with very low variance (likely solid colors or UI elements)
+                if region_std[0][0] < 20:
+                    continue
+                
+                # Add to browser images list
+                browser_images.append((x, y, w, h))
+        except Exception as e:
+            print(f"Error in browser-specific detection: {e}")
+
+        # Process each contour from the original detection
         for contour in contours:
             # Get bounding rectangle
             x, y, w, h = cv2.boundingRect(contour)
@@ -344,9 +426,58 @@ def cv_detect_and_analyze_regions(image_data: bytes) -> List[Dict[str, Any]]:
             total_pixels = roi.size
             edge_density = edge_pixels / total_pixels
             
-            # Skip regions with very low or very high edge density
+            # MODIFIED: More permissive edge density range for browser content
             # Low density = mostly blank, high density = likely noise or text
-            if edge_density < 0.05 or edge_density > 0.5:
+            if edge_density < 0.03 or edge_density > 0.7:  # Changed from 0.05-0.5 to 0.03-0.7
+                continue
+            
+            # Instead of processing immediately, add to candidate list
+            candidate_regions.append((x, y, w, h))
+        
+        # Combine both standard and browser-specific regions
+        all_candidate_regions = candidate_regions + browser_images
+        
+        # Prioritize regions by size (prefer larger regions) - helps focus on main content
+        all_candidate_regions.sort(key=lambda r: r[2] * r[3], reverse=True)
+        
+        # Limit number of regions to process
+        all_candidate_regions = all_candidate_regions[:12]  # Process at most 12 candidates
+        
+        # ADDED: Function to free GPU memory
+        def free_gpu_memory():
+            if torch.cuda.is_available():
+                try:
+                    torch.cuda.empty_cache()
+                    print("Cleared GPU cache")
+                except Exception as e:
+                    print(f"Error clearing GPU cache: {e}")
+        
+        # MODIFIED: Process regions with memory management
+        processed_count = 0
+        for x, y, w, h in all_candidate_regions:
+            # Stop if we've reached max regions
+            if len(regions) >= max_regions:
+                break
+                
+            # Skip if this region overlaps significantly with already detected regions
+            skip = False
+            for region in regions:
+                rx = region["position"]["x"]
+                ry = region["position"]["y"]
+                rw = region["position"]["width"]
+                rh = region["position"]["height"]
+                
+                # Calculate overlap
+                overlap_x = max(0, min(x + w, rx + rw) - max(x, rx))
+                overlap_y = max(0, min(y + h, ry + rh) - max(y, ry))
+                overlap_area = overlap_x * overlap_y
+                
+                # Skip if overlap is significant (>50% of the smaller region)
+                if overlap_area > 0.5 * min(w * h, rw * rh):
+                    skip = True
+                    break
+            
+            if skip:
                 continue
             
             # Extract the region from the original image
@@ -355,52 +486,111 @@ def cv_detect_and_analyze_regions(image_data: bytes) -> List[Dict[str, Any]]:
             # Convert region to PIL Image for BLIP analysis
             region_pil = Image.fromarray(cv2.cvtColor(region_img, cv2.COLOR_BGR2RGB))
             
+            # ADDED: Downsize large images to conserve memory
+            max_image_size = 512 if is_gpu_low_memory else 1024
+            if region_pil.width > max_image_size or region_pil.height > max_image_size:
+                region_pil.thumbnail((max_image_size, max_image_size), Image.LANCZOS)
+                print(f"Resized large region to {region_pil.size} to save memory")
+            
             # Create a buffer for the region image
             region_buffer = io.BytesIO()
             region_pil.save(region_buffer, format='JPEG')
             region_bytes = region_buffer.getvalue()
             
+            # ADDED: CPU fallback if GPU memory is low
+            device_to_use = "cpu" if is_gpu_low_memory else device
+            
             # Analyze the region with BLIP
             try:
+                # Free memory before processing
+                if processed_count > 0 and processed_count % 2 == 0:  # Every 2 images
+                    free_gpu_memory()
+                
                 inputs = processor(images=region_pil, text="What can you see in this image?", return_tensors="pt")
                 
-                # Move inputs to the same device as model
-                inputs = {k: v.to(device) for k, v in inputs.items()}
+                # Move inputs to the selected device
+                inputs = {k: v.to(device_to_use) for k, v in inputs.items()}
                 
-                with torch.no_grad():  # Disable gradient calculation for inference
-                    out = model.generate(**inputs, max_new_tokens=blip_config["max_new_tokens"])
+                # Move model to same device if using CPU fallback
+                if device_to_use == "cpu" and str(next(model.parameters()).device) != "cpu":
+                    # Use a smaller subsection of the model on CPU to save memory
+                    print("Using CPU for inference due to GPU memory constraints")
+                    with torch.no_grad():
+                        out = model.generate(**inputs, max_new_tokens=50)  # Reduced tokens for CPU
+                else:
+                    with torch.no_grad():  # Disable gradient calculation for inference
+                        out = model.generate(**inputs, max_new_tokens=blip_config["max_new_tokens"])
                 
                 caption = processor.decode(out[0], skip_special_tokens=True)
                 
-                # Store the region information
-                region_info = {
-                    "position": {
-                        "x": x,
-                        "y": y,
-                        "width": w,
-                        "height": h,
-                        "center_x": x + w // 2,
-                        "center_y": y + h // 2
-                    },
-                    "caption": caption,
-                    "edge_density": edge_density,
-                    "image_data": region_bytes
-                }
-                
-                regions.append(region_info)
-                print(f"Analyzed region at ({x}, {y}, {w}, {h}): {caption}")
-                
-                # Limit the number of regions to analyze
-                if len(regions) >= max_regions:
-                    break
+                # Only add if caption suggests this is an actual image
+                if not any(keyword in caption.lower() for keyword in ["website", "webpage", "interface"]):
+                    # Store the region information
+                    region_info = {
+                        "position": {
+                            "x": x,
+                            "y": y,
+                            "width": w,
+                            "height": h,
+                            "center_x": x + w // 2,
+                            "center_y": y + h // 2
+                        },
+                        "caption": caption,
+                        "edge_density": edge_density if 'edge_density' in locals() else None,
+                        "image_data": region_bytes
+                    }
+                    
+                    regions.append(region_info)
+                    print(f"Analyzed region at ({x}, {y}, {w}, {h}): {caption}")
+                    processed_count += 1
+                else:
+                    print(f"Skipped non-image region at ({x}, {y}, {w}, {h}): {caption}")
             
             except Exception as e:
                 print(f"Error analyzing region: {e}")
+                # If CUDA OOM, try to recover by clearing cache and reducing future processing
+                if "CUDA out of memory" in str(e):
+                    print("CUDA OOM detected, trying to recover...")
+                    free_gpu_memory()
+                    is_gpu_low_memory = True  # Switch to low memory mode
+                    
+                    # Try one more time with CPU
+                    try:
+                        print("Retrying with CPU...")
+                        # Move to CPU
+                        cpu_inputs = {k: v.to("cpu") for k, v in inputs.items()}
+                        
+                        with torch.no_grad():
+                            # Use a smaller text generation to save memory
+                            out = model.to("cpu").generate(**cpu_inputs, max_new_tokens=30)
+                            caption = processor.decode(out[0], skip_special_tokens=True)
+                            
+                            region_info = {
+                                "position": {
+                                    "x": x,
+                                    "y": y,
+                                    "width": w,
+                                    "height": h,
+                                    "center_x": x + w // 2,
+                                    "center_y": y + h // 2
+                                },
+                                "caption": caption + " (CPU processed)",
+                                "edge_density": edge_density if 'edge_density' in locals() else None,
+                                "image_data": region_bytes
+                            }
+                            
+                            regions.append(region_info)
+                            print(f"Successfully processed with CPU fallback: {caption}")
+                            
+                            # Move model back to original device
+                            if torch.cuda.is_available():
+                                model.to(device)
+                    except Exception as cpu_e:
+                        print(f"CPU fallback also failed: {cpu_e}")
                 continue
         
-        # Clear CUDA cache to prevent memory leaks if using GPU
-        if torch.cuda.is_available():
-            torch.cuda.empty_cache()
+        # Final attempt to clean up memory
+        free_gpu_memory()
         
         print(f"Found and analyzed {len(regions)} image-like regions")
         return regions
@@ -2696,4 +2886,137 @@ def analyze_window(window_title: str = None, window_id: str = None) -> Dict[str,
         print(f"Error analyzing window content: {e}")
         traceback.print_exc()
         return {"error": f"Error analyzing window content: {str(e)}"}
+
+def get_screenshot_at_mouse(width: int = 300, height: int = 300) -> bytes:
+    """
+    Capture a screenshot of a rectangular area extending down and to the right from the current mouse position.
+    
+    Args:
+        width: Width of the area to capture in pixels
+        height: Height of the area to capture in pixels
+        
+    Returns:
+        The screenshot image as bytes
+    """
+    try:
+        # Get current mouse position
+        mouse_x, mouse_y = pyautogui.position()
+        print(f"Mouse position: {mouse_x}, {mouse_y}")
+        
+        # Define the region to capture (extending down and right from mouse position)
+        with mss.mss() as sct:
+            # Get primary monitor to ensure we stay within its bounds
+            monitors_info = get_available_monitors()
+            primary_monitor_id = monitors_info.get("primary", 1)
+            primary_monitor = sct.monitors[primary_monitor_id]
+            
+            # Calculate capture region, ensuring it stays within monitor bounds
+            region = {
+                "left": mouse_x,
+                "top": mouse_y,
+                "width": min(width, primary_monitor["width"] - mouse_x),
+                "height": min(height, primary_monitor["height"] - mouse_y)
+            }
+            
+            # Capture the screenshot
+            screenshot = sct.grab(region)
+            img = Image.frombytes("RGB", screenshot.size, screenshot.rgb)
+            
+            # Convert to bytes
+            buf = io.BytesIO()
+            img.save(buf, format='PNG')
+            return buf.getvalue()
+    except Exception as e:
+        import traceback
+        print(f"Error capturing screenshot at mouse: {e}")
+        traceback.print_exc()
+        return None
+
+def extract_dropdown_options(image_data: bytes) -> List[Dict[str, Any]]:
+    """
+    Extract text options from a dropdown menu screenshot.
+    
+    This function is optimized for extracting menu items from dropdown/context menus
+    with their coordinates, allowing for interaction with individual menu options.
+    
+    Args:
+        image_data: Raw image data in bytes (from get_screenshot_at_mouse)
+        
+    Returns:
+        List of dictionaries containing menu options with text and absolute coordinates
+    """
+    try:
+        print("Extracting dropdown menu lines...")
+        
+        if not image_data:
+            print("Error: No image data provided")
+            return []
+            
+        # Convert bytes to OpenCV image
+        nparr = np.frombuffer(image_data, np.uint8)
+        img = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
+        
+        if img is None:
+            print("Error: Failed to decode image data")
+            return []
+        
+        # Get current mouse position for absolute coordinates calculation
+        mouse_x, mouse_y = pyautogui.position()
+            
+        # Convert to grayscale
+        gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+        
+        # Use pytesseract to detect text with positioning information
+        ocr_data = pytesseract.image_to_data(gray, output_type=pytesseract.Output.DICT)
+        
+        menu_options = []
+        for i, text in enumerate(ocr_data["text"]):
+            text = text.strip()
+            if not text:  # Skip empty results
+                continue
+                
+            conf = int(ocr_data["conf"][i])
+            if conf < 40:  # Skip very low confidence results
+                continue
+                
+            # Get relative coordinates from OCR
+            x_rel = ocr_data["left"][i]
+            y_rel = ocr_data["top"][i]
+            w = ocr_data["width"][i]
+            h = ocr_data["height"][i]
+            
+            # Calculate absolute screen coordinates
+            x_abs = mouse_x + x_rel
+            y_abs = mouse_y + y_rel
+            
+            menu_option = {
+                "text": text,
+                "absolute_position": {
+                    "x": x_abs,
+                    "y": y_abs,
+                    "width": w,
+                    "height": h,
+                    "center_x": x_abs + w // 2,
+                    "center_y": y_abs + h // 2
+                },
+                "relative_position": {
+                    "x": x_rel,
+                    "y": y_rel,
+                    "width": w,
+                    "height": h
+                },
+                "confidence": conf
+            }
+            menu_options.append(menu_option)
+            print(f"Found menu line: '{text}' at abs({x_abs}, {y_abs})")
+        
+        # Sort menu options by vertical position (top to bottom)
+        menu_options.sort(key=lambda opt: opt["absolute_position"]["y"])
+        
+        return menu_options
+    except Exception as e:
+        import traceback
+        print(f"Error extracting dropdown options: {str(e)}")
+        traceback.print_exc()
+        return []
  
